@@ -11,6 +11,8 @@ export { nodesToHtmlContext } from './engine/context';
 export { parseAiTweaks, parseNovaResponse } from './engine/parse';
 export { resolveGeneratedImageTokens } from './engine/imageTokens';
 export { mergeGeneratedNodes, runNovaTurn } from './engine/engine';
+export { applyNovaTurnToState, createNovaEditorBindings } from './bindings';
+export { defaultEditorPreset, defaultEditorPresetJson } from './presets';
 export type {
   MergeGeneratedNodesInput,
   MergeGeneratedNodesResult,
@@ -21,3 +23,13 @@ export type {
   NovaTurnInput,
   NovaTurnResult,
 } from './engine/types';
+export type {
+  ApplyNovaTurnToStateInput,
+  ApplyNovaTurnToStateResult,
+  NovaEditorTurnBindings,
+} from './bindings';
+export type {
+  NovaEditorPreset,
+  NovaEditorPanelPreset,
+  NovaEditorToolPreset,
+} from './presets';

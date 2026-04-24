@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nova-design-engine.dev/schemas/editor-preset.schema.json",
+  "title": "Nova Editor Preset",
+  "type": "object",
+  "required": ["version", "name", "canvas", "panels", "tools", "bindings"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "canvas": {
+      "type": "object",
+      "required": ["minZoom", "maxZoom", "defaultZoom"],
+      "additionalProperties": false,
+      "properties": {
+        "minZoom": { "type": "number", "minimum": 0.01 },
+        "maxZoom": { "type": "number", "minimum": 0.02 },
+        "defaultZoom": { "type": "number", "minimum": 0.01 }
+      }
+    },
+    "panels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "region", "visible"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "region": {
+            "type": "string",
+            "enum": ["left", "center", "right", "bottom"]
+          },
+          "visible": { "type": "boolean" },
+          "width": { "type": "number", "minimum": 1 },
+          "height": { "type": "number", "minimum": 1 }
+        }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "group"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
+          "shortcut": { "type": "string", "minLength": 1 },
+          "group": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "required": ["runTurn", "mergeNodes", "parser"],
+      "additionalProperties": false,
+      "properties": {
+        "runTurn": { "type": "string", "const": "runNovaTurn" },
+        "mergeNodes": { "type": "string", "const": "mergeGeneratedNodes" },
+        "parser": { "type": "string", "const": "parseHTMLToNodes" }
+      }
+    }
+  }
+}

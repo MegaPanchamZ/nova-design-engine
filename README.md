@@ -27,6 +27,11 @@ npm install nova-design-engine
 - Parser/export: `parseHTMLToNodes`, `exportToCode`.
 - BYO assistant primitives: `runNovaTurn`, `mergeGeneratedNodes`, `parseNovaResponse`, `nodesToHtmlContext`, `DEFAULT_NOVA_SYSTEM_PROMPT`.
 
+Editor integration helpers are available from `nova-design-engine/bindings`:
+
+- `createNovaEditorBindings`
+- `applyNovaTurnToState`
+
 Browser-only export helpers are available from `nova-design-engine/browser`:
 
 - `exportToSVG`
@@ -36,6 +41,40 @@ Browser-only export helpers are available from `nova-design-engine/browser`:
 Parser-focused browser-safe import is available from `nova-design-engine/parser`:
 
 - `parseHTMLToNodes`
+
+## React Editor Components
+
+You can import prebuilt React editor components from `nova-design-engine/react`:
+
+- `NovaEditorShell`
+- `Canvas`
+- `Toolbar`
+- `LayersPanel`
+- `PropertiesPanel`
+- `NovaAI`
+- `useStore`
+
+Example:
+
+```tsx
+import { NovaEditorShell } from 'nova-design-engine/react';
+
+export default function App() {
+   return <NovaEditorShell showChat />;
+}
+```
+
+## JSON Presets And Schema
+
+The package ships a default editor preset JSON and schema so teams can create custom layouts and tool sets:
+
+- `nova-design-engine/presets/default-editor-preset.json`
+- `nova-design-engine/presets/editor-preset.schema.json`
+
+You can also consume a typed preset in code from `nova-design-engine/presets`:
+
+- `defaultEditorPreset`
+- `defaultEditorPresetJson`
 
 ## BYO LLM Binding
 
