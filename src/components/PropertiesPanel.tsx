@@ -1,12 +1,19 @@
 import React, { useState, useCallback, useRef } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Settings2, Type, Move, Palette, Combine, Scissors, BoxSelect, Layers, AlignVerticalSpaceAround, AlignHorizontalSpaceAround, ChevronDown, Database, Minus, MousePointer2, Square, Zap, AlignLeft, AlignCenter as AlignCenterHorizontal, AlignRight, AlignStartVertical as AlignTop, AlignCenterVertical, AlignEndVertical as AlignBottom, ArrowLeftRight, ArrowUpDown, RotateCw, Maximize2, Monitor, Plus, Eye, EyeOff, Trash2, GripVertical } from 'lucide-react';
+import { Settings2, Type, Move, Palette, Combine, Scissors, BoxSelect, Layers, AlignVerticalSpaceAround, AlignHorizontalSpaceAround, ChevronDown, Database, Minus, MousePointer2, Square, AlignLeft, AlignCenter as AlignCenterHorizontal, AlignRight, AlignStartVertical as AlignTop, AlignCenterVertical, AlignEndVertical as AlignBottom, ArrowLeftRight, ArrowUpDown, RotateCw, Maximize2, Monitor, Plus, Eye, EyeOff, Trash2, GripVertical } from 'lucide-react';
 import { useStore } from '../store';
 import { Effect, FrameNode, Interaction, Paint, PathNode, SceneNode, TextNode, createDefaultNode } from '../types';
 import { performBooleanOperation } from '../lib/boolean';
 import { GOOGLE_FONTS, loadFont } from '../services/fontService';
 import { v4 as uuidv4 } from 'uuid';
 import { exportToCode } from '../lib/codeExport';
+import { ColorPickerDialog, FillEditorDialog } from './FillEditorDialog';
+
+interface ColorDialogState {
+    isOpen: boolean;
+    title: string;
+    color: string;
+}
 
 const ScrubLabel = ({ label, value, onChange, onBlur, icon: Icon, step = 1, suffix = "" }: { label: string, value: number, onChange: (val: number) => void, onBlur?: () => void, icon?: LucideIcon | React.ComponentType<{ size: number; strokeWidth?: number; className?: string }>; step?: number, suffix?: string }) => {
     const isDragging = useRef(false);
@@ -71,9 +78,9 @@ const InputField = ({ value, onChange, onBlur, disabled = false, prefix, suffix,
             disabled={disabled}
             onChange={(e) => onChange(e.target.value)}
             onBlur={onBlur}
-            className="w-full bg-transparent border-none outline-none text-[11px] text-[#EDEDED] font-mono px-1 h-full"
+            className={`w-full min-w-0 bg-transparent border-none outline-none text-[11px] text-[#EDEDED] font-mono px-1 h-full ${suffix ? 'text-right' : ''}`}
         />
-        {suffix && (typeof suffix === 'string' ? <span className="text-[9px] text-[#888] font-mono pr-1">{suffix}</span> : suffix)}
+        {suffix && (typeof suffix === 'string' ? <span className="ml-1 shrink-0 text-[9px] text-[#888] font-mono pr-1">{suffix}</span> : suffix)}
     </div>
 );
 
@@ -97,6 +104,10 @@ export const PropertiesPanel = () => {
   const [expandedRadius, setExpandedRadius] = useState(false);
     const [exportScale, setExportScale] = useState('1x');
     const [exportFormat, setExportFormat] = useState('TSX');
+        const [isFillEditorOpen, setIsFillEditorOpen] = useState(false);
+        const [fillEditorStartIndex, setFillEditorStartIndex] = useState(0);
+                const [colorDialog, setColorDialog] = useState<ColorDialogState>({ isOpen: false, title: 'Color', color: '#D9D9D9' });
+                const colorApplyRef = useRef<((nextColor: string) => void) | null>(null);
 
   const currentPage = pages.find(p => p.id === currentPageId);
   const nodes = currentPage?.nodes || [];
@@ -104,6 +115,49 @@ export const PropertiesPanel = () => {
   const selectedNode = selectedNodes[0];
     const selectedFrameNode = selectedNode && ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type) ? (selectedNode as FrameNode) : null;
     const selectedTextNode = selectedNode?.type === 'text' ? (selectedNode as TextNode) : null;
+
+    const isFrameLikeNode = (node: SceneNode) => ['frame', 'section', 'group', 'component', 'instance'].includes(node.type);
+    const normalizeHexColor = (value: string) => /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#D9D9D9';
+    const getNodeDisplayColor = (node: SceneNode) => {
+        const visibleSolid = [...(node.fills || [])].reverse().find((paint) => paint.type === 'solid' && paint.visible !== false);
+        return normalizeHexColor(String(visibleSolid?.color || node.fill || '#D9D9D9'));
+    };
+
+    const isDescendantOf = (node: SceneNode, ancestorId: string): boolean => {
+        let parentId = node.parentId;
+        while (parentId) {
+            if (parentId === ancestorId) return true;
+            parentId = nodes.find((n) => n.id === parentId)?.parentId;
+        }
+        return false;
+    };
+
+    const frameColorTargets = selectedFrameNode
+        ? nodes.filter((node) => isDescendantOf(node, selectedFrameNode.id) && !isFrameLikeNode(node))
+        : [];
+
+    const frameFillColorGroups = selectedFrameNode
+        ? (() => {
+            const grouped = new Map<string, { color: string; count: number }>();
+            frameColorTargets.forEach((target) => {
+                const solidFills = (target.fills || []).filter((paint) => paint.type === 'solid');
+                if (solidFills.length === 0) {
+                    const color = getNodeDisplayColor(target);
+                    const existing = grouped.get(color);
+                    grouped.set(color, { color, count: (existing?.count || 0) + 1 });
+                    return;
+                }
+
+                solidFills.forEach((paint) => {
+                    const color = normalizeHexColor(String(paint.color || '#D9D9D9'));
+                    const existing = grouped.get(color);
+                    grouped.set(color, { color, count: (existing?.count || 0) + 1 });
+                });
+            });
+
+            return Array.from(grouped.values()).sort((a, b) => b.count - a.count);
+        })()
+        : [];
 
   const handleBoolean = (operation: 'union' | 'subtract' | 'intersect' | 'exclude') => {
     const pathData = performBooleanOperation(selectedNodes, operation);
@@ -127,6 +181,88 @@ export const PropertiesPanel = () => {
     });
   };
 
+    const applySelectedFills = (nextFills: Paint[]) => {
+        const lastSolid = [...nextFills].reverse().find((paint) => paint.type === 'solid');
+        selectedIds.forEach((id) => {
+            updateNode(
+                id,
+                {
+                    fills: nextFills,
+                    ...(lastSolid ? { fill: lastSolid.color } : { fill: 'transparent' })
+                } as Partial<SceneNode>
+            );
+        });
+    };
+
+    const applySelectedStrokes = (nextStrokes: Paint[]) => {
+        const lastSolid = [...nextStrokes].reverse().find((paint) => paint.type === 'solid');
+        selectedIds.forEach((id) => {
+            updateNode(id, { strokes: nextStrokes, ...(lastSolid ? { stroke: lastSolid.color } : {}) } as Partial<SceneNode>);
+        });
+    };
+
+    const paintSwatchBackground = (paint: Paint): string => {
+        if (paint.type === 'solid') {
+            return paint.color || '#D9D9D9';
+        }
+
+        const stops = (paint.gradientStops || [
+            { offset: 0, color: '#FFFFFF' },
+            { offset: 1, color: '#000000' },
+        ]).map((stop) => `${stop.color} ${Math.round((stop.offset || 0) * 100)}%`);
+
+        if (paint.type === 'gradient-radial') {
+            const centerX = Math.round((paint.gradientCenter?.x ?? 0.5) * 100);
+            const centerY = Math.round((paint.gradientCenter?.y ?? 0.5) * 100);
+            const radius = Math.round((paint.gradientRadius ?? 0.5) * 100);
+            return `radial-gradient(circle ${radius}% at ${centerX}% ${centerY}%, ${stops.join(', ')})`;
+        }
+
+        const angle = Number.isFinite(paint.gradientAngle) ? paint.gradientAngle : 90;
+        return `linear-gradient(${angle}deg, ${stops.join(', ')})`;
+    };
+
+    const openColorDialog = (title: string, color: string, onApply: (nextColor: string) => void) => {
+        colorApplyRef.current = onApply;
+        setColorDialog({ isOpen: true, title, color: normalizeHexColor(color) });
+    };
+
+    const closeColorDialog = () => {
+        setColorDialog((prev) => ({ ...prev, isOpen: false }));
+        colorApplyRef.current = null;
+        pushHistory();
+    };
+
+    const applyFrameColorGroup = (sourceColor: string, nextColor: string) => {
+        if (!selectedFrameNode || frameColorTargets.length === 0) return;
+        const source = normalizeHexColor(sourceColor);
+        const target = normalizeHexColor(nextColor);
+
+        frameColorTargets.forEach((frameChild) => {
+            const childFills = frameChild.fills || [];
+
+            if (childFills.length === 0) {
+                if (normalizeHexColor(frameChild.fill || '#D9D9D9') === source) {
+                    updateNode(frameChild.id, { fill: target });
+                }
+                return;
+            }
+
+            const nextFills = childFills.map((paint) => {
+                if (paint.type !== 'solid') return paint;
+                const paintColor = normalizeHexColor(String(paint.color || '#D9D9D9'));
+                if (paintColor !== source) return paint;
+                return { ...paint, color: target };
+            });
+
+            const lastSolid = [...nextFills].reverse().find((paint) => paint.type === 'solid');
+            updateNode(frameChild.id, {
+                fills: nextFills,
+                ...(lastSolid ? { fill: String(lastSolid.color) } : {})
+            });
+        });
+    };
+
   const handleFontChange = async (font: string) => {
     await loadFont(font);
     handleChange('fontFamily', font);
@@ -137,12 +273,22 @@ export const PropertiesPanel = () => {
     pushHistory();
   };
 
+        const openFillEditor = (index = 0) => {
+                setFillEditorStartIndex(index);
+                setIsFillEditorOpen(true);
+        };
+
+        const closeFillEditor = () => {
+                setIsFillEditorOpen(false);
+                pushHistory();
+        };
+
     const clampNonNegative = (value: number) => Math.max(0, value);
     const parseNonNegativeInt = (value: string) => clampNonNegative(parseInt(value) || 0);
 
   if (selectedNodes.length === 0) {
     return (
-      <aside id="properties-panel" className="w-64 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
+            <aside id="properties-panel" className="w-80 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
         <div className="flex border-b border-[#2A2A2A]">
           <div 
             onClick={() => setMode('design')}
@@ -170,7 +316,7 @@ export const PropertiesPanel = () => {
     const isFrame = ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type);
 
   return (
-    <aside id="properties-panel" className="w-64 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
+        <aside id="properties-panel" className="w-80 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
       <div className="flex border-b border-[#2A2A2A]">
           <div 
             onClick={() => setMode('design')}
@@ -449,6 +595,23 @@ export const PropertiesPanel = () => {
                     />
                 </div>
             )}
+
+            <div className="px-4 pt-2 space-y-1.5">
+                <div className="flex justify-between items-center text-[10px] text-[#888] font-bold uppercase tracking-widest">
+                    <span>Corner Smoothing</span>
+                    <span>{Math.round((selectedNode.cornerSmoothing || 0) * 100)}%</span>
+                </div>
+                <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={selectedNode.cornerSmoothing || 0}
+                    onChange={(e) => handleChange('cornerSmoothing', parseFloat(e.target.value))}
+                    onMouseUp={handleBlur}
+                    className="w-full h-1 bg-[#2C2C2C] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                />
+            </div>
             
             <div className="px-4 pt-2 flex items-center justify-between">
                 <span className="text-[10px] text-[#888] font-bold uppercase tracking-widest">Masking</span>
@@ -696,49 +859,57 @@ export const PropertiesPanel = () => {
                                     onChange={(v) => handleChange('gap', parseInt(v) || 0)}
                                     prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Gap</span>}
                                 />
-                                <div className="grid grid-cols-2 gap-2">
-                                    <InputField 
-                                        value={(selectedNode as FrameNode).padding.top} 
-                                        onChange={(v) => {
-                                            const p = parseInt(v) || 0;
-                                            handleChange('padding', { top: p, right: p, bottom: p, left: p });
-                                        }}
-                                        prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Pad</span>}
-                                    />
-                                    <button 
-                                        onClick={() => setExpandedPadding(!expandedPadding)}
-                                        className={`h-7 rounded-sm flex items-center justify-center transition-colors ${expandedPadding ? 'bg-indigo-500/20 text-indigo-400' : 'bg-[#2C2C2C] text-[#888] hover:text-white'}`}
-                                    >
-                                        <Monitor size={14} />
-                                    </button>
-                                </div>
-                                {expandedPadding && (
-                                    <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-[#2A2A2A]">
-                                        <InputField 
-                                            value={(selectedNode as FrameNode).padding.top} 
-                                            onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, top: parseInt(v) || 0 })}
-                                            prefix={<span className="text-[9px] text-[#666]">T</span>}
-                                        />
-                                        <InputField 
-                                            value={(selectedNode as FrameNode).padding.right} 
-                                            onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, right: parseInt(v) || 0 })}
-                                            prefix={<span className="text-[9px] text-[#666]">R</span>}
-                                        />
-                                        <InputField 
-                                            value={(selectedNode as FrameNode).padding.bottom} 
-                                            onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, bottom: parseInt(v) || 0 })}
-                                            prefix={<span className="text-[9px] text-[#666]">B</span>}
-                                        />
-                                        <InputField 
-                                            value={(selectedNode as FrameNode).padding.left} 
-                                            onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, left: parseInt(v) || 0 })}
-                                            prefix={<span className="text-[9px] text-[#666]">L</span>}
-                                        />
-                                    </div>
-                                )}
                              </div>
                         </div>
                     )}
+
+                    <div className="space-y-2 pt-2 border-t border-[#2A2A2A]">
+                        <div className="grid grid-cols-2 gap-2">
+                            <InputField
+                                value={(selectedNode as FrameNode).padding.top}
+                                onChange={(v) => {
+                                    const p = parseInt(v) || 0;
+                                    handleChange('padding', { top: p, right: p, bottom: p, left: p });
+                                }}
+                                suffix="px"
+                                prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Pad</span>}
+                            />
+                            <button
+                                onClick={() => setExpandedPadding(!expandedPadding)}
+                                className={`h-7 rounded-sm flex items-center justify-center text-[9px] font-bold uppercase tracking-wider transition-colors ${expandedPadding ? 'bg-indigo-500/20 text-indigo-400' : 'bg-[#2C2C2C] text-[#888] hover:text-white'}`}
+                            >
+                                4-side
+                            </button>
+                        </div>
+                        {expandedPadding && (
+                            <div className="grid grid-cols-1 gap-2 mt-2 pt-2 border-t border-[#2A2A2A]">
+                                <InputField
+                                    value={(selectedNode as FrameNode).padding.top}
+                                    onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, top: parseInt(v) || 0 })}
+                                    suffix="px"
+                                    prefix={<span className="text-[9px] text-[#666] w-6">Top</span>}
+                                />
+                                <InputField
+                                    value={(selectedNode as FrameNode).padding.right}
+                                    onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, right: parseInt(v) || 0 })}
+                                    suffix="px"
+                                    prefix={<span className="text-[9px] text-[#666] w-6">Right</span>}
+                                />
+                                <InputField
+                                    value={(selectedNode as FrameNode).padding.bottom}
+                                    onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, bottom: parseInt(v) || 0 })}
+                                    suffix="px"
+                                    prefix={<span className="text-[9px] text-[#666] w-6">Bottom</span>}
+                                />
+                                <InputField
+                                    value={(selectedNode as FrameNode).padding.left}
+                                    onChange={(v) => handleChange('padding', { ...(selectedNode as FrameNode).padding, left: parseInt(v) || 0 })}
+                                    suffix="px"
+                                    prefix={<span className="text-[9px] text-[#666] w-6">Left</span>}
+                                />
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
         )}
@@ -813,35 +984,11 @@ export const PropertiesPanel = () => {
                 </>
             } />
             <div className="px-4 space-y-3">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 gap-2">
                     <InputField 
                         value={`${Math.round(selectedNode.opacity * 100)}%`} 
                         onChange={(v) => handleChange('opacity', (parseInt(v) || 0) / 100)}
                         prefix={<ScrubLabel label="OP" value={selectedNode.opacity * 100} onChange={(v) => handleChange('opacity', v / 100)} onBlur={handleBlur} icon={Database} />}
-                    />
-                    <InputField 
-                        value={Math.round((selectedNode.cornerSmoothing || 0) * 100)} 
-                        onChange={(v) => handleChange('cornerSmoothing', (parseInt(v) || 0) / 100)}
-                        suffix="%"
-                        prefix={<ScrubLabel label="CS" value={(selectedNode.cornerSmoothing || 0) * 100} onChange={(v) => handleChange('cornerSmoothing', v / 100)} onBlur={handleBlur} icon={Zap} />}
-                    />
-                </div>
-                
-                {/* Smoothing Slider */}
-                <div className="space-y-1.5 px-0.5">
-                    <div className="flex justify-between items-center text-[9px] text-[#666] font-bold uppercase">
-                        <span>Corner Smoothing</span>
-                        <span>{Math.round((selectedNode.cornerSmoothing || 0) * 100)}%</span>
-                    </div>
-                    <input 
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={selectedNode.cornerSmoothing || 0}
-                        onChange={(e) => handleChange('cornerSmoothing', parseFloat(e.target.value))}
-                        onBlur={handleBlur}
-                        className="w-full h-1 bg-[#2C2C2C] rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
                 </div>
 
@@ -865,34 +1012,52 @@ export const PropertiesPanel = () => {
             </div>
         </div>
 
-        {/* Variables Section */}
-        <div className="border-b border-[#2A2A2A] pb-4">
-            <SectionHeader title="Variables" actions={
-                <button 
-                                    onClick={() => addVariable({ name: 'Token', type: 'color', value: '#FFFFFF' })}
-                  className="p-1 text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
-                  <Database size={14} />
-                </button>
-            } />
-            <div className="px-4 space-y-2">
-                                {variables.length === 0 ? (
-                    <div className="text-[10px] text-[#555] italic">No variables defined</div>
-                ) : (
-                                        variables.map(v => (
-                        <div key={v.id} className="flex items-center gap-2 group">
-                             <div className="w-4 h-4 rounded-full border border-[#2A2A2A]" style={{ backgroundColor: v.value as string }} />
-                             <span className="text-[11px] text-[#A1A1A1] flex-1">{v.name}</span>
-                             <span className="text-[9px] text-[#555] font-mono">{String(v.value)}</span>
+        {selectedFrameNode && frameFillColorGroups.length > 0 && (
+            <div className="border-b border-[#2A2A2A] pb-2">
+                <SectionHeader title="Frame Fill Colors" />
+                <div className="px-4 space-y-2">
+                    {frameFillColorGroups.map((group) => (
+                        <div key={group.color} className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    let sourceColor = group.color;
+                                    openColorDialog('Frame Fill Color', group.color, (nextColor) => {
+                                        applyFrameColorGroup(sourceColor, nextColor);
+                                        sourceColor = nextColor;
+                                    });
+                                }}
+                                className="relative w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] shrink-0"
+                            >
+                                <div className="w-full h-full" style={{ backgroundColor: group.color }} />
+                            </button>
+                            <InputField
+                                value={group.color.toUpperCase().replace('#', '')}
+                                onChange={(v) => {
+                                    const hex = v.replace(/[^0-9a-fA-F]/g, '').slice(0, 6);
+                                    if (hex.length === 6) applyFrameColorGroup(group.color, `#${hex}`);
+                                }}
+                                onBlur={handleBlur}
+                                className="flex-1"
+                            />
+                            <span className="text-[9px] text-[#666] font-mono w-10 text-right">{group.count}</span>
                         </div>
-                    ))
-                )}
+                    ))}
+                </div>
             </div>
-        </div>
+        )}
+
         {/* Fill */}
         <div id="fill-controls" className="border-b border-[#2A2A2A] pb-2">
             <SectionHeader title="Fill" actions={
                 <div className="flex gap-2">
+                    <button
+                        onClick={() => openFillEditor((selectedNode.fills || []).length > 0 ? (selectedNode.fills || []).length - 1 : 0)}
+                        className="px-2 h-6 rounded-sm border border-[#3A3A3A] text-[9px] uppercase tracking-widest text-[#AAA] hover:text-white hover:border-indigo-500/60"
+                        title="Open Advanced Fill Editor"
+                    >
+                        Edit
+                    </button>
                     <button 
                         onClick={() => {
                             const newFill = { id: uuidv4(), type: 'solid', color: '#D9D9D9', opacity: 1, visible: true };
@@ -926,27 +1091,18 @@ export const PropertiesPanel = () => {
             <div className="px-4 space-y-2">
                 {(selectedNode.fills || []).map((paint: Paint, idx: number) => (
                     <div key={paint.id} className="flex items-center gap-2 group">
-                        <div className="w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative">
+                        <button
+                            onClick={() => openFillEditor(idx)}
+                            type="button"
+                            className="w-9 h-9 shrink-0 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative"
+                            title="Edit Fill Layer"
+                        >
                             <div 
                                 className="w-full h-full" 
-                                style={{ 
-                                    background: paint.type === 'solid' ? paint.color : 
-                                    `linear-gradient(to right, ${paint.gradientStops?.[0]?.color || '#fff'}, ${paint.gradientStops?.[1]?.color || '#000'})` 
-                                }} 
+                                style={{ background: paintSwatchBackground(paint) }}
                             />
-                            <input 
-                                type="color" 
-                                value={paint.color || '#D9D9D9'} 
-                                onChange={(e) => {
-                                    const next = [...(selectedNode.fills || [])];
-                                    next[idx] = { ...next[idx], color: e.target.value };
-                                    handleChange('fills', next);
-                                    if (idx === next.length - 1) handleChange('fill', e.target.value);
-                                }}
-                                className="absolute inset-0 opacity-0 cursor-pointer"
-                            />
-                        </div>
-                        <div className="flex-[2] flex items-center gap-1 bg-[#2C2C2C] rounded-sm px-1.5 h-7">
+                        </button>
+                        <div className="flex-[2] min-w-0 flex items-center gap-1 bg-[#2C2C2C] rounded-sm px-1.5 h-7">
                             <select 
                                 value={paint.type}
                                 onChange={(e) => {
@@ -962,6 +1118,7 @@ export const PropertiesPanel = () => {
                             >
                                 <option value="solid">Solid</option>
                                 <option value="gradient-linear">Linear</option>
+                                <option value="gradient-radial">Radial</option>
                             </select>
                             <div className="w-[1px] h-3 bg-[#333] mx-1" />
                             {paint.type === 'solid' ? (
@@ -977,21 +1134,23 @@ export const PropertiesPanel = () => {
                             ) : (
                                 <div className="flex-1 flex gap-1 items-center">
                                     {(paint.gradientStops || []).map((stop, sidx: number) => (
-                                        <div key={sidx} className="relative w-4 h-4 rounded-full border border-[#444] overflow-hidden">
-                                            <div className="w-full h-full" style={{ backgroundColor: stop.color }} />
-                                            <input 
-                                                type="color" 
-                                                value={stop.color} 
-                                                onChange={(e) => {
+                                        <button
+                                            key={sidx}
+                                            type="button"
+                                            onClick={() =>
+                                                openColorDialog('Gradient Stop Color', stop.color, (nextColor) => {
                                                     const nextFills = [...(selectedNode.fills || [])];
                                                     const nextStops = [...(nextFills[idx].gradientStops || [])];
-                                                    nextStops[sidx] = { ...nextStops[sidx], color: e.target.value };
+                                                    if (!nextStops[sidx]) return;
+                                                    nextStops[sidx] = { ...nextStops[sidx], color: nextColor };
                                                     nextFills[idx] = { ...nextFills[idx], gradientStops: nextStops };
                                                     handleChange('fills', nextFills);
-                                                }}
-                                                className="absolute inset-0 opacity-0 cursor-pointer"
-                                            />
-                                        </div>
+                                                })
+                                            }
+                                            className="relative w-4 h-4 rounded-full border border-[#444] overflow-hidden"
+                                        >
+                                            <div className="w-full h-full" style={{ backgroundColor: stop.color }} />
+                                        </button>
                                     ))}
                                 </div>
                             )}
@@ -1006,14 +1165,21 @@ export const PropertiesPanel = () => {
                             suffix="%"
                             className="w-12"
                         />
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                            onClick={() => openFillEditor(idx)}
+                            className="px-1.5 h-7 rounded-sm border border-[#333] text-[9px] uppercase tracking-wider text-[#999] hover:text-white hover:border-indigo-500/50"
+                            title="Advanced Fill Settings"
+                        >
+                            FX
+                        </button>
+                        <div className="flex items-center gap-0.5 opacity-100">
                             <button 
                                 onClick={() => {
                                     const next = [...(selectedNode.fills || [])];
                                     next[idx].visible = !next[idx].visible;
                                     handleChange('fills', next);
                                 }}
-                                className="p-1 text-[#555] hover:text-[#888]"
+                                className="p-1 text-[#777] hover:text-[#D0D0D0]"
                             >
                                 {paint.visible ? <Eye size={12} /> : <EyeOff size={12} />}
                             </button>
@@ -1022,7 +1188,7 @@ export const PropertiesPanel = () => {
                                     const next = (selectedNode.fills || []).filter((_: Paint, i: number) => i !== idx);
                                     handleChange('fills', next);
                                 }}
-                                className="p-1 text-[#555] hover:text-[#FF4D4D]"
+                                className="p-1 text-[#777] hover:text-[#FF4D4D]"
                             >
                                 <Minus size={12} />
                             </button>
@@ -1054,20 +1220,19 @@ export const PropertiesPanel = () => {
                 {(selectedNode.strokes || []).map((paint: Paint, idx: number) => (
                     <div key={paint.id} className="flex flex-col gap-2 group p-2 bg-[#2C2C2C]/30 rounded-sm">
                         <div className="flex items-center gap-2">
-                            <div className="w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative">
-                                <div className="w-full h-full" style={{ backgroundColor: paint.color }} />
-                                <input 
-                                    type="color" 
-                                    value={paint.color || '#000000'} 
-                                    onChange={(e) => {
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    openColorDialog('Stroke Color', paint.color || '#000000', (nextColor) => {
                                         const next = [...(selectedNode.strokes || [])];
-                                        next[idx] = { ...next[idx], color: e.target.value };
-                                        handleChange('strokes', next);
-                                        if (idx === next.length - 1) handleChange('stroke', e.target.value);
-                                    }}
-                                    className="absolute inset-0 opacity-0 cursor-pointer"
-                                />
-                            </div>
+                                        next[idx] = { ...next[idx], color: nextColor };
+                                        applySelectedStrokes(next);
+                                    })
+                                }
+                                className="w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative"
+                            >
+                                <div className="w-full h-full" style={{ backgroundColor: paint.color }} />
+                            </button>
                             <InputField 
                                 value={paint.color?.toUpperCase().replace('#', '') || ''} 
                                 onChange={(v) => {
@@ -1220,20 +1385,20 @@ export const PropertiesPanel = () => {
                                         prefix={<span className="text-[9px] text-[#555] px-1 font-bold">Blur</span>}
                                     />
                                     <div className="flex-1 flex items-center bg-[#2C2C2C] border border-transparent rounded-sm px-1.5 h-7">
-                                        <div className="w-4 h-4 rounded-full mr-1 border border-[#444] overflow-hidden">
-                                            <div className="w-full h-full" style={{ backgroundColor: (effect.color || '#00000040').substring(0, 7) }} />
-                                            <input 
-                                                type="color" 
-                                                value={(effect.color || '#00000040').substring(0, 7)} 
-                                                onChange={(e) => {
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                openColorDialog('Effect Color', (effect.color || '#00000040').substring(0, 7), (nextColor) => {
                                                     const next = [...(selectedNode.effects || [])];
                                                     const currentColor = effect.color || '#00000040';
-                                                    next[idx] = { ...next[idx], color: e.target.value + (currentColor.length > 7 ? currentColor.substring(7) : '40') };
+                                                    next[idx] = { ...next[idx], color: nextColor + (currentColor.length > 7 ? currentColor.substring(7) : '40') };
                                                     handleChange('effects', next);
-                                                }}
-                                                className="absolute inset-0 opacity-0 cursor-pointer"
-                                            />
-                                        </div>
+                                                })
+                                            }
+                                            className="w-4 h-4 rounded-full mr-1 border border-[#444] overflow-hidden"
+                                        >
+                                            <div className="w-full h-full" style={{ backgroundColor: (effect.color || '#00000040').substring(0, 7) }} />
+                                        </button>
                                         <InputField 
                                             value={Math.round((parseInt((effect.color || '#00000040').substring(7), 16) || 64) / 2.55)}
                                             onChange={(v) => {
@@ -1265,6 +1430,50 @@ export const PropertiesPanel = () => {
                     </div>
                 ))}
              </div>
+        </div>
+
+        <FillEditorDialog
+            isOpen={isFillEditorOpen}
+            fills={selectedNode.fills || []}
+            initialFillIndex={fillEditorStartIndex}
+            onChange={(nextFills) => applySelectedFills(nextFills)}
+            onClose={closeFillEditor}
+        />
+
+        <ColorPickerDialog
+            isOpen={colorDialog.isOpen}
+            title={colorDialog.title}
+            color={colorDialog.color}
+            onChange={(nextColor) => {
+                setColorDialog((prev) => ({ ...prev, color: nextColor }));
+                colorApplyRef.current?.(nextColor);
+            }}
+            onClose={closeColorDialog}
+        />
+
+        {/* Variables Section */}
+        <div className="border-b border-[#2A2A2A] pb-4">
+            <SectionHeader title="Variables" actions={
+                <button
+                    onClick={() => addVariable({ name: 'Token', type: 'color', value: '#FFFFFF' })}
+                    className="p-1 text-indigo-400 hover:text-indigo-300 transition-colors"
+                >
+                    <Database size={14} />
+                </button>
+            } />
+            <div className="px-4 space-y-2">
+                {variables.length === 0 ? (
+                    <div className="text-[10px] text-[#555] italic">No variables defined</div>
+                ) : (
+                    variables.map(v => (
+                        <div key={v.id} className="flex items-center gap-2 group">
+                            <div className="w-4 h-4 rounded-full border border-[#2A2A2A]" style={{ backgroundColor: v.value as string }} />
+                            <span className="text-[11px] text-[#A1A1A1] flex-1">{v.name}</span>
+                            <span className="text-[9px] text-[#555] font-mono">{String(v.value)}</span>
+                        </div>
+                    ))
+                )}
+            </div>
         </div>
 
 

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { AITweak, DesignState, SceneNode, ToolType, Viewport, createDefaultNode, FrameNode, Page, Variable, Style, TextNode, SnapLine } from './types';
+import { AITweak, DesignState, SceneNode, ToolType, Viewport, createDefaultNode, FrameNode, Page, Variable, Style, TextNode, SnapLine, Paint } from './types';
 import { calculateLayout } from './lib/layoutUtils';
 import { measureText } from './lib/measureText';
 import { v4 as uuidv4 } from 'uuid';
@@ -33,6 +33,76 @@ const sanitizeSize = (value: number, fallback = 1): number => {
 const sanitizeUnitInterval = (value: number, fallback = 0): number => {
     if (!Number.isFinite(value)) return Math.min(1, Math.max(0, fallback));
     return Math.min(1, Math.max(0, value));
+};
+
+const sanitizePaintCollection = (paints: Paint[] | undefined, fallbackColor: string): Paint[] | undefined => {
+    if (!paints) return undefined;
+
+    return paints.map((paint) => {
+        const base = {
+            id: paint.id || uuidv4(),
+            type: paint.type,
+            opacity: sanitizeUnitInterval(paint.opacity ?? 1, 1),
+            visible: paint.visible !== false,
+        } as Paint;
+
+        if (paint.type === 'solid') {
+            return {
+                ...base,
+                type: 'solid',
+                color: paint.color || fallbackColor,
+            } as Paint;
+        }
+
+        const stops = (paint.gradientStops || [
+            { offset: 0, color: '#FFFFFF' },
+            { offset: 1, color: '#000000' },
+        ]).map((stop, index) => ({
+            offset: sanitizeUnitInterval(stop.offset ?? (index === 0 ? 0 : 1), index === 0 ? 0 : 1),
+            color: stop.color || (index === 0 ? '#FFFFFF' : '#000000'),
+        }));
+
+        if (paint.type === 'gradient-radial') {
+            return {
+                ...base,
+                type: 'gradient-radial',
+                gradientStops: stops,
+                gradientCenter: {
+                    x: sanitizeUnitInterval(paint.gradientCenter?.x ?? 0.5, 0.5),
+                    y: sanitizeUnitInterval(paint.gradientCenter?.y ?? 0.5, 0.5),
+                },
+                gradientRadius: Math.min(1, Math.max(0.05, Number.isFinite(paint.gradientRadius) ? Number(paint.gradientRadius) : 0.5)),
+            } as Paint;
+        }
+
+        return {
+            ...base,
+            type: 'gradient-linear',
+            gradientStops: stops,
+            gradientAngle: Number.isFinite(paint.gradientAngle) ? Number(paint.gradientAngle) : 0,
+        } as Paint;
+    });
+};
+
+const deriveConvenienceColorFromPaints = (paints: Paint[] | undefined, fallback: string): string => {
+    if (!paints || paints.length === 0) return fallback;
+
+    const visiblePaints = paints.filter((paint) => paint.visible !== false);
+    const source = visiblePaints.length > 0 ? visiblePaints : paints;
+
+    for (let i = source.length - 1; i >= 0; i--) {
+        const paint = source[i];
+        if (paint.type === 'solid' && paint.color) {
+            return String(paint.color);
+        }
+        const stops = paint.gradientStops || [];
+        if (stops.length > 0) {
+            const lastStop = stops[stops.length - 1];
+            if (lastStop?.color) return String(lastStop.color);
+        }
+    }
+
+    return fallback;
 };
 
 const sanitizeCornerValue = (value: number, fallback: number, maxCornerRadius: number): number => {
@@ -526,12 +596,58 @@ export const useStore = create<DesignStore>((set, get) => ({
         if (n.id === id) {
             let updated = { ...n, ...updates } as SceneNode;
             
-            // Sync legacy fill/stroke updates with multi-paint system
-            if (updates.fill !== undefined) {
-                updated.fills = [{ id: uuidv4(), type: 'solid', color: updates.fill, opacity: updated.opacity || 1, visible: true }];
+            // Sync legacy fill/stroke updates with multi-paint system, but preserve paint ids.
+            if (updates.fill !== undefined && updates.fills === undefined) {
+                const targetColor = String(updates.fill);
+                const nextFills: Paint[] = (updated.fills && updated.fills.length > 0)
+                    ? updated.fills.map((paint) => ({ ...paint }))
+                    : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: updated.opacity || 1, visible: true }];
+
+                let applied = false;
+                for (let i = nextFills.length - 1; i >= 0; i--) {
+                    if (nextFills[i].type === 'solid') {
+                        nextFills[i] = { ...nextFills[i], color: targetColor };
+                        applied = true;
+                        break;
+                    }
+                }
+
+                if (!applied) {
+                    nextFills.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
+                }
+
+                updated.fills = nextFills;
             }
-            if (updates.stroke !== undefined) {
-                updated.strokes = [{ id: uuidv4(), type: 'solid', color: updates.stroke, opacity: 1, visible: true }];
+            if (updates.stroke !== undefined && updates.strokes === undefined) {
+                const targetColor = String(updates.stroke);
+                const nextStrokes: Paint[] = (updated.strokes && updated.strokes.length > 0)
+                    ? updated.strokes.map((paint) => ({ ...paint }))
+                    : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true }];
+
+                let applied = false;
+                for (let i = nextStrokes.length - 1; i >= 0; i--) {
+                    if (nextStrokes[i].type === 'solid') {
+                        nextStrokes[i] = { ...nextStrokes[i], color: targetColor };
+                        applied = true;
+                        break;
+                    }
+                }
+
+                if (!applied) {
+                    nextStrokes.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
+                }
+
+                updated.strokes = nextStrokes;
+            }
+
+            if (updates.fills !== undefined) {
+                updated.fills = sanitizePaintCollection(updated.fills, updated.fill || '#D9D9D9');
+                updated.fill = deriveConvenienceColorFromPaints(updated.fills, 'transparent');
+            }
+
+            if (updates.strokes !== undefined) {
+                updated.strokes = sanitizePaintCollection(updated.strokes, updated.stroke || '#000000');
+                updated.stroke = deriveConvenienceColorFromPaints(updated.strokes, updated.stroke || '#000000');
             }
 
             // Text sync logic

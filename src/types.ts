@@ -37,6 +37,9 @@ export interface Paint {
   type: 'solid' | 'gradient-linear' | 'gradient-radial';
   color?: string;
   gradientStops?: { offset: number; color: string }[];
+  gradientAngle?: number;
+  gradientCenter?: { x: number; y: number };
+  gradientRadius?: number;
   opacity: number;
   visible: boolean;
 }

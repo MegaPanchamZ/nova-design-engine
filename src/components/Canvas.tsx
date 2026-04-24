@@ -27,6 +27,13 @@ interface KonvaImageProps {
   hoverProps: React.ComponentProps<typeof Rect> | null;
 }
 
+const isFrameLikeNode = (node: SceneNode): boolean =>
+  node.type === 'frame' ||
+  node.type === 'section' ||
+  node.type === 'group' ||
+  node.type === 'component' ||
+  node.type === 'instance';
+
 interface SanitizedCorners {
   topLeft: number;
   topRight: number;
@@ -882,6 +889,8 @@ export const Canvas = () => {
     const nodeData = nodes.find(n => n.id === nodeId);
     if (!nodeData) return;
 
+    const isTransformEvent = e.type === 'transformend' || e.type === 'transform';
+
     const newWidth = clampSize(Math.abs(konvaNode.width() * konvaNode.scaleX()), Math.abs(nodeData.width));
     const newHeight = clampSize(Math.abs(konvaNode.height() * konvaNode.scaleY()), Math.abs(nodeData.height));
     const isCenterAnchored = nodeData.type === 'circle' || nodeData.type === 'ellipse';
@@ -902,11 +911,13 @@ export const Canvas = () => {
     const excluded = getDescendants(nodeId);
     
     // Use center of node for reparenting detection
-    const newParentId = findInnermostFrame(
-        globalX + (konvaNode.width() * konvaNode.scaleX()) / 2, 
-        globalY + (konvaNode.height() * konvaNode.scaleY()) / 2, 
+    const newParentId = isTransformEvent
+      ? nodeData.parentId
+      : findInnermostFrame(
+        globalX + (konvaNode.width() * konvaNode.scaleX()) / 2,
+        globalY + (konvaNode.height() * konvaNode.scaleY()) / 2,
         excluded
-    );
+      );
 
     let finalX = globalX;
     let finalY = globalY;
@@ -939,36 +950,90 @@ export const Canvas = () => {
 
   const renderSingleNode = (node: SceneNode) => {
     const isSelected = selectedIds.includes(node.id);
-    const getPaintProps = (paints: Paint[] | undefined, fallback: string) => {
-      if (!paints || paints.length === 0) return { fill: fallback };
-      const visible = paints.filter(p => p.visible !== false);
-      if (visible.length === 0) return { fill: 'transparent' };
-      
-      const paint = visible[visible.length - 1];
-      if (paint.type === 'solid') {
-        return { fill: paint.color, opacity: (node.opacity || 1) * (paint.opacity || 1) };
-      } else if (paint.type === 'gradient-linear') {
-        const stops: (number | string)[] = [];
-        (paint.gradientStops || []).forEach((s) => {
-          stops.push(s.offset, s.color);
-        });
-        return {
-          fillLinearGradientStartPoint: { x: 0, y: 0 },
-          fillLinearGradientEndPoint: { x: node.width, y: 0 },
-          fillLinearGradientColorStops: stops,
-          opacity: (node.opacity || 1) * (paint.opacity || 1)
-        };
-      }
-      return { fill: paint.color || fallback };
+    const getVisibleFills = (paints: Paint[] | undefined, fallback: string): Paint[] => {
+      const visible = (paints || []).filter((paint) => paint.visible !== false);
+      if (visible.length > 0) return visible;
+      return [{ id: `${node.id}-fallback-fill`, type: 'solid', color: fallback, opacity: 1, visible: true }];
     };
 
-    let fillProps = getPaintProps(node.fills, node.fill);
-    let strokeProps = getPaintProps(node.strokes, node.stroke);
+    const getVisibleStrokes = (paints: Paint[] | undefined, fallback: string): Paint[] => {
+      const visible = (paints || []).filter((paint) => paint.visible !== false);
+      if (visible.length > 0) return visible;
+      return [{ id: `${node.id}-fallback-stroke`, type: 'solid', color: fallback, opacity: 1, visible: true }];
+    };
+
+    const getLinearGradientPoints = (paint: Paint) => {
+      const angle = Number.isFinite(paint.gradientAngle) ? Number(paint.gradientAngle) : 0;
+      const radians = (angle * Math.PI) / 180;
+      const cx = node.width / 2;
+      const cy = node.height / 2;
+      const dx = Math.cos(radians) * (node.width / 2);
+      const dy = Math.sin(radians) * (node.height / 2);
+      return {
+        start: { x: cx - dx, y: cy - dy },
+        end: { x: cx + dx, y: cy + dy },
+      };
+    };
+
+    const getGradientStops = (paint: Paint): (number | string)[] => {
+      const rawStops = (paint.gradientStops || []).map((stop) => ({
+        offset: Math.min(1, Math.max(0, Number.isFinite(stop.offset) ? stop.offset : 0)),
+        color: stop.color,
+      }));
+      const stops = rawStops.length > 0 ? rawStops : [{ offset: 0, color: '#FFFFFF' }, { offset: 1, color: '#000000' }];
+      const sorted = [...stops].sort((a, b) => a.offset - b.offset);
+      const result: (number | string)[] = [];
+      sorted.forEach((stop) => {
+        result.push(stop.offset, stop.color);
+      });
+      return result;
+    };
+
+    const getPaintFillProps = (paint: Paint | undefined, fallback: string) => {
+      const safePaint = paint || { id: `${node.id}-safe`, type: 'solid' as const, color: fallback, opacity: 1, visible: true };
+      const opacity = (node.opacity || 1) * (safePaint.opacity || 1);
+
+      if (safePaint.type === 'solid') {
+        return { fill: safePaint.color || fallback, opacity };
+      }
+
+      if (safePaint.type === 'gradient-radial') {
+        const center = safePaint.gradientCenter || { x: 0.5, y: 0.5 };
+        const radius = Math.max(0.05, Math.min(1, safePaint.gradientRadius ?? 0.5));
+        const baseRadius = Math.min(Math.abs(node.width), Math.abs(node.height)) * radius;
+        return {
+          fillRadialGradientStartPoint: { x: center.x * node.width, y: center.y * node.height },
+          fillRadialGradientStartRadius: 0,
+          fillRadialGradientEndPoint: { x: center.x * node.width, y: center.y * node.height },
+          fillRadialGradientEndRadius: baseRadius,
+          fillRadialGradientColorStops: getGradientStops(safePaint),
+          opacity,
+        };
+      }
+
+      const { start, end } = getLinearGradientPoints(safePaint);
+      return {
+        fillLinearGradientStartPoint: start,
+        fillLinearGradientEndPoint: end,
+        fillLinearGradientColorStops: getGradientStops(safePaint),
+        opacity,
+      };
+    };
+
+    const fillPaints = getVisibleFills(node.fills, node.fill || '#D9D9D9');
+    const topFillPaint = fillPaints[fillPaints.length - 1];
+    const underFillPaints = fillPaints.slice(0, -1);
+    let fillProps = getPaintFillProps(topFillPaint, node.fill || '#D9D9D9');
+
+    const strokePaints = getVisibleStrokes(node.strokes, node.stroke || '#000000');
+    const topStrokePaint = strokePaints[strokePaints.length - 1];
+    const strokeColor = topStrokePaint?.type === 'solid' ? (topStrokePaint.color || node.stroke) : node.stroke;
+    const strokeOpacity = (node.opacity || 1) * (topStrokePaint?.opacity || 1);
 
     // Keep mask visuals readable and non-destructive on canvas.
     if (node.isMask) {
       fillProps = { fill: 'rgba(59, 130, 246, 0.18)', opacity: 1 };
-      strokeProps = { fill: '#60A5FA', opacity: 1 };
+      underFillPaints.length = 0;
     }
     const cornerData = getSanitizedCornerData(node);
     const cornerRadiusArray = cornerData.cornerRadiusArray;
@@ -1007,14 +1072,10 @@ export const Canvas = () => {
       width: node.width,
       height: node.height,
       rotation: node.rotation,
-      opacity: node.opacity,
       globalCompositeOperation: blendModeMap[node.blendMode || 'normal'] || 'source-over',
       draggable: node.draggable && !node.locked && tool === 'select' && !isPanning,
       listening: node.visible,
       dash: node.isMask ? [8 / viewport.zoom, 4 / viewport.zoom] : undefined,
-      ...fillProps,
-      stroke: strokeProps.fill,
-      strokeWidth: node.strokeWidth,
       cornerRadius: cornerRadiusArray,
       ...shadowProps,
       ...blurProps,
@@ -1024,6 +1085,9 @@ export const Canvas = () => {
       onTransformEnd: handleNodeUpdate,
         onTransform: (e: CanvasMouseEvent) => {
           const nodeTarget = e.target;
+          if (isFrameLikeNode(node)) {
+            return;
+          }
           const scaleX = nodeTarget.scaleX();
           const scaleY = nodeTarget.scaleY();
           
@@ -1119,12 +1183,34 @@ export const Canvas = () => {
                         ctx.closePath();
                     } : undefined}
                 >
+                  {underFillPaints.map((paint) => {
+                    const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+                    if (hasSmoothing) {
+                      return (
+                        <Path
+                          key={`${node.id}-under-${paint.id}`}
+                          data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                          {...layerProps}
+                          listening={false}
+                        />
+                      );
+                    }
+                    return (
+                      <Rect
+                        key={`${node.id}-under-${paint.id}`}
+                        width={node.width}
+                        height={node.height}
+                        cornerRadius={cornerRadiusArray}
+                        {...layerProps}
+                        lineJoin="round"
+                        listening={false}
+                      />
+                    );
+                  })}
                     {hasSmoothing ? (
                         <Path 
                         data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
                             {...fillProps}
-                            stroke={strokeProps.fill}
-                            strokeWidth={node.strokeWidth}
                         />
                     ) : (
                         <Rect 
@@ -1132,11 +1218,33 @@ export const Canvas = () => {
                             height={node.height} 
                             cornerRadius={cornerRadiusArray}
                             {...fillProps}
-                            stroke={strokeProps.fill}
-                            strokeWidth={node.strokeWidth}
                             lineJoin="round"
                         />
                     )}
+                  {node.strokeWidth > 0 && (
+                    hasSmoothing ? (
+                      <Path
+                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                        fillEnabled={false}
+                        stroke={strokeColor}
+                        strokeWidth={node.strokeWidth}
+                        opacity={strokeOpacity}
+                        listening={false}
+                      />
+                    ) : (
+                      <Rect
+                        width={node.width}
+                        height={node.height}
+                        cornerRadius={cornerRadiusArray}
+                        fillEnabled={false}
+                        stroke={strokeColor}
+                        strokeWidth={node.strokeWidth}
+                        opacity={strokeOpacity}
+                        lineJoin="round"
+                        listening={false}
+                      />
+                    )
+                  )}
                     {selectionProps && (
                         <Rect 
                             width={node.width}
@@ -1178,15 +1286,78 @@ export const Canvas = () => {
       const hasSmoothing = smoothCornerSmoothing > 0;
         return (
             <Group key={node.id}>
+          {underFillPaints.map((paint) => {
+            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            if (hasSmoothing) {
+              return (
+                <Path
+                  key={`${node.id}-under-${paint.id}`}
+                  x={node.x}
+                  y={node.y}
+                  rotation={node.rotation}
+                  data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                  {...layerProps}
+                  listening={false}
+                  lineJoin="round"
+                />
+              );
+            }
+            return (
+              <Rect
+                key={`${node.id}-under-${paint.id}`}
+                x={node.x}
+                y={node.y}
+                width={node.width}
+                height={node.height}
+                rotation={node.rotation}
+                cornerRadius={cornerRadiusArray}
+                {...layerProps}
+                lineJoin="round"
+                listening={false}
+              />
+            );
+          })}
                 {hasSmoothing ? (
                     <Path 
                         {...konvaProps} 
+              {...fillProps}
               data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)} 
                         lineJoin="round"
                     />
                 ) : (
-                    <Rect {...konvaProps} cornerRadius={cornerRadiusArray} lineJoin="round" />
+            <Rect {...konvaProps} {...fillProps} cornerRadius={cornerRadiusArray} lineJoin="round" />
                 )}
+          {node.strokeWidth > 0 && (
+            hasSmoothing ? (
+              <Path
+                x={node.x}
+                y={node.y}
+                rotation={node.rotation}
+                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                fillEnabled={false}
+                stroke={strokeColor}
+                strokeWidth={node.strokeWidth}
+                opacity={strokeOpacity}
+                listening={false}
+                lineJoin="round"
+              />
+            ) : (
+              <Rect
+                x={node.x}
+                y={node.y}
+                width={node.width}
+                height={node.height}
+                rotation={node.rotation}
+                cornerRadius={cornerRadiusArray}
+                fillEnabled={false}
+                stroke={strokeColor}
+                strokeWidth={node.strokeWidth}
+                opacity={strokeOpacity}
+                listening={false}
+                lineJoin="round"
+              />
+            )
+          )}
                 {selectionProps && (
                     <Rect 
                         x={node.x} y={node.y} width={node.width} height={node.height}
@@ -1225,11 +1396,41 @@ export const Canvas = () => {
             ...konvaProps,
             x: node.x + radius,
             y: node.y + radius,
-            radius: radius
+        radius: radius,
+        ...fillProps,
         };
         return (
             <Group key={node.id}>
+          {underFillPaints.map((paint) => {
+            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            return (
+              <Circle
+                key={`${node.id}-under-${paint.id}`}
+                x={node.x + radius}
+                y={node.y + radius}
+                radius={radius}
+                rotation={node.rotation}
+                {...layerProps}
+                listening={false}
+                lineJoin="round"
+              />
+            );
+          })}
                 <Circle {...circleProps} lineJoin="round" />
+          {node.strokeWidth > 0 && (
+            <Circle
+              x={node.x + radius}
+              y={node.y + radius}
+              radius={radius}
+              rotation={node.rotation}
+              fillEnabled={false}
+              stroke={strokeColor}
+              strokeWidth={node.strokeWidth}
+              opacity={strokeOpacity}
+              listening={false}
+              lineJoin="round"
+            />
+          )}
                 {selectionProps && (
                     <Circle 
                         x={node.x + radius} y={node.y + radius} radius={radius}
@@ -1253,11 +1454,43 @@ export const Canvas = () => {
             x: node.x + radiusX,
             y: node.y + radiusY,
             radiusX: radiusX,
-            radiusY: radiusY
+        radiusY: radiusY,
+        ...fillProps,
         };
         return (
             <Group key={node.id}>
+          {underFillPaints.map((paint) => {
+            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            return (
+              <Ellipse
+                key={`${node.id}-under-${paint.id}`}
+                x={node.x + radiusX}
+                y={node.y + radiusY}
+                radiusX={radiusX}
+                radiusY={radiusY}
+                rotation={node.rotation}
+                {...layerProps}
+                listening={false}
+                lineJoin="round"
+              />
+            );
+          })}
                 <Ellipse {...ellipseProps} lineJoin="round" />
+          {node.strokeWidth > 0 && (
+            <Ellipse
+              x={node.x + radiusX}
+              y={node.y + radiusY}
+              radiusX={radiusX}
+              radiusY={radiusY}
+              rotation={node.rotation}
+              fillEnabled={false}
+              stroke={strokeColor}
+              strokeWidth={node.strokeWidth}
+              opacity={strokeOpacity}
+              listening={false}
+              lineJoin="round"
+            />
+          )}
                 {selectionProps && (
                     <Ellipse 
                         x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
@@ -1276,7 +1509,33 @@ export const Canvas = () => {
     if (node.type === 'path') {
         const pathComp = (
             <Group key={node.id}>
-                <Path {...konvaProps} data={node.data} lineJoin="round" />
+          {underFillPaints.map((paint) => (
+            <Path
+              key={`${node.id}-under-${paint.id}`}
+              x={node.x}
+              y={node.y}
+              rotation={node.rotation}
+              data={node.data}
+              {...getPaintFillProps(paint, node.fill || '#D9D9D9')}
+              lineJoin="round"
+              listening={false}
+            />
+          ))}
+          <Path {...konvaProps} {...fillProps} data={node.data} lineJoin="round" />
+          {node.strokeWidth > 0 && (
+            <Path
+              x={node.x}
+              y={node.y}
+              rotation={node.rotation}
+              data={node.data}
+              fillEnabled={false}
+              stroke={strokeColor}
+              strokeWidth={node.strokeWidth}
+              opacity={strokeOpacity}
+              lineJoin="round"
+              listening={false}
+            />
+          )}
                 {hoverProps && <Path data={node.data} rotation={node.rotation} {...hoverProps} x={node.x} y={node.y} />}
             </Group>
         );
@@ -1308,23 +1567,49 @@ export const Canvas = () => {
       const lineHeight = node.lineHeight ? node.lineHeight / node.fontSize : 1.2;
       const isVerticalWriting = node.writingMode === 'vertical-rl' || node.writingMode === 'vertical-lr';
       const resolvedRotation = node.rotation || (isVerticalWriting ? 90 : 0);
+      const topTextPaintProps = getPaintFillProps(topFillPaint, node.fill || '#D9D9D9');
+      const baseTextOpacity = Number.isFinite((topTextPaintProps as { opacity?: number }).opacity)
+        ? Number((topTextPaintProps as { opacity?: number }).opacity)
+        : (node.opacity || 1);
+      const textBaseProps = {
+        text: node.text,
+        fontSize: node.fontSize,
+        fontFamily: node.fontFamily,
+        align: node.align,
+        verticalAlign: 'top' as const,
+        width: node.width,
+        height: node.height,
+        visible: editingId !== node.id,
+        lineHeight,
+        wrap: 'word' as const,
+        padding: 1,
+        lineJoin: 'round' as const,
+      };
       return (
         <Group key={node.id}>
+            {underFillPaints.map((paint) => {
+              const layerPaintProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+              const layerOpacity = Number.isFinite((layerPaintProps as { opacity?: number }).opacity)
+                ? Number((layerPaintProps as { opacity?: number }).opacity)
+                : (node.opacity || 1);
+              return (
+                <Text
+                  key={`${node.id}-under-${paint.id}`}
+                  x={node.x}
+                  y={node.y}
+                  rotation={resolvedRotation}
+                  {...textBaseProps}
+                  {...layerPaintProps}
+                  opacity={isVerticalWriting ? layerOpacity * 0.9 : layerOpacity}
+                  listening={false}
+                />
+              );
+            })}
             <Text
             {...konvaProps}
-            text={node.text}
-            fontSize={node.fontSize}
-            fontFamily={node.fontFamily}
-            align={node.align}
-            verticalAlign="top"
-            width={node.width}
-            height={node.height}
-            visible={editingId !== node.id}
-            lineHeight={lineHeight}
-            wrap="word"
-            padding={1}
-            lineJoin="round"
-            opacity={isVerticalWriting ? 0.9 : node.opacity}
+            {...textBaseProps}
+            {...topTextPaintProps}
+            opacity={isVerticalWriting ? baseTextOpacity * 0.9 : baseTextOpacity}
             rotation={resolvedRotation}
             />
             {selectionProps && (
@@ -1620,7 +1905,7 @@ export const Canvas = () => {
               <Transformer
                 ref={transformerRef}
                 keepRatio={false}
-                centeredScaling={true} // Enables Alt (Option) center scaling automatically
+                centeredScaling={false}
                 shiftBehavior="inverted"
                 boundBoxFunc={(oldBox, newBox) => {
                   if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) return oldBox;

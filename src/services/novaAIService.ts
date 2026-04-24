@@ -1,13 +1,75 @@
 import { GoogleGenAI } from "@google/genai";
-import { AIMessage, SceneNode } from "../types";
+import { AIMessage, Paint, SceneNode } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+
+const toRgba = (color: string, opacity: number): string => {
+  const safeOpacity = Math.min(1, Math.max(0, opacity));
+  if (safeOpacity >= 0.999) return color;
+
+  const hex = color.trim().match(/^#([\da-fA-F]{3}|[\da-fA-F]{4}|[\da-fA-F]{6}|[\da-fA-F]{8})$/);
+  if (hex) {
+    const raw = hex[1];
+    const expanded = raw.length <= 4
+      ? raw.split('').map((c) => c + c).join('')
+      : raw;
+    const r = parseInt(expanded.slice(0, 2), 16);
+    const g = parseInt(expanded.slice(2, 4), 16);
+    const b = parseInt(expanded.slice(4, 6), 16);
+    const sourceAlpha = expanded.length === 8 ? parseInt(expanded.slice(6, 8), 16) / 255 : 1;
+    const alpha = Math.min(1, Math.max(0, sourceAlpha * safeOpacity));
+    return `rgb(${r} ${g} ${b} / ${alpha.toFixed(3)})`;
+  }
+
+  const rgba = color.replace(/\s+/g, '').match(/^rgba?\(([-\d.]+),([-\d.]+),([-\d.]+)(?:,([-\d.]+))?\)$/i);
+  if (rgba) {
+    const r = Number(rgba[1]);
+    const g = Number(rgba[2]);
+    const b = Number(rgba[3]);
+    const sourceAlpha = rgba[4] ? Number(rgba[4]) : 1;
+    const alpha = Math.min(1, Math.max(0, sourceAlpha * safeOpacity));
+    return `rgb(${Math.round(r)} ${Math.round(g)} ${Math.round(b)} / ${alpha.toFixed(3)})`;
+  }
+
+  return color;
+};
+
+const paintToCssBackground = (paint: Paint): string => {
+  const opacity = paint.opacity ?? 1;
+  if (paint.type === 'solid') {
+    return toRgba(paint.color || '#D9D9D9', opacity);
+  }
+
+  const stops = (paint.gradientStops || [])
+    .map((stop: { offset: number; color: string }) => `${stop.color} ${Math.round(Math.min(1, Math.max(0, stop.offset)) * 100)}%`)
+    .join(', ');
+
+  if (paint.type === 'gradient-radial') {
+    const center = paint.gradientCenter || { x: 0.5, y: 0.5 };
+    const radius = Math.min(1, Math.max(0.05, paint.gradientRadius ?? 0.5));
+    return `radial-gradient(circle ${Math.round(radius * 100)}% at ${Math.round(center.x * 100)}% ${Math.round(center.y * 100)}%, ${stops || '#FFFFFF 0%, #000000 100%'})`;
+  }
+
+  const angle = Number.isFinite(paint.gradientAngle) ? paint.gradientAngle : 0;
+  return `linear-gradient(${angle}deg, ${stops || '#FFFFFF 0%, #000000 100%'})`;
+};
+
+const nodeBackgroundCss = (node: SceneNode): string => {
+  const fills = (node.fills || []).filter((paint) => paint.visible !== false);
+  if (fills.length === 0) return node.fill;
+  return fills
+    .slice()
+    .reverse()
+    .map((paint) => paintToCssBackground(paint))
+    .join(', ');
+};
 
 const nodesToHTMContext = (nodes: SceneNode[]): string => {
   const buildHTML = (id?: string): string => {
         const children = nodes.filter(n => n.parentId === id);
     return children.map((n): string => {
-            let style = `position: absolute; left: ${Math.round(n.x)}px; top: ${Math.round(n.y)}px; width: ${Math.round(n.width)}px; height: ${Math.round(n.height)}px; background: ${n.fill};`;
+            const background = nodeBackgroundCss(n);
+            let style = `position: absolute; left: ${Math.round(n.x)}px; top: ${Math.round(n.y)}px; width: ${Math.round(n.width)}px; height: ${Math.round(n.height)}px; background: ${background};`;
             if (n.type === 'text') {
                 return `<p id="${n.id}" style="${style} font-size: ${n.fontSize}px; font-family: ${n.fontFamily};">${n.text}</p>`;
             }
@@ -36,6 +98,8 @@ Your goal is to build interfaces with extreme craft, intentionality, and distinc
 6. **Iterative Precision**: Use context IDs to surgically update parts. If asked to change a color of a selected layer, ONLY return the updated HTML for that layer (or its parent frame if structural changes are needed).
 7. **Identity Requirement**: Every single HTML element you return MUST have a unique and MEANINGFUL 'id' attribute (e.g., id="navbar", id="hero_heading", id="submit_button"). Avoid generic IDs or using tag names as IDs. These IDs directly translate to layer names.
 8. **Multi-Page/Multi-Slide Logic**: If asked for multiple pages, slides, or high-level variations, DO NOT nest them inside a single container. Return them as separate, parallel top-level HTML tags with descriptive IDs (e.g., id="home_page", id="about_page"). 
+9. **Paint System Awareness**: Backgrounds map to layered fills. Use comma-separated CSS backgrounds for multi-layer fills and explicit multi-stop gradients when needed.
+10. **Opacity Precision**: Use rgba/rgb with alpha or hex8 colors when opacity is important for fill layers.
 
 ### IMAGE GENERATION
 If the user asks for a specific image, illustration, or photo, you can trigger generation by using:
@@ -79,6 +143,8 @@ Raw HTML with INLINE STYLES using Flexbox.
 [TWEAKS]
 Optional: A JSON array of suggested controls for the user to fine-tune.
 Example: [{"label": "Glow Intensity", "targetId": "Selection", "property": "opacity", "type": "slider", "min": 0, "max": 1, "value": 0.8}]
+You can target nested fill paths for advanced edits, such as:
+[{"label":"Stop 2 Hue","targetId":"hero_card","property":"fills[0].gradientStops[1].color","type":"color","value":"#FF4D6D"},{"label":"Top Fill Opacity","targetId":"hero_card","property":"fills[1].opacity","type":"slider","min":0,"max":1,"value":0.8}]
 [/TWEAKS]
 
 ### Iteration Rules

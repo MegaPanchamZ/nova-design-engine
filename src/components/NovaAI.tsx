@@ -19,7 +19,80 @@ export const NovaAI = () => {
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
     
-    const { aiHistory, sendAIChat, selectedIds, aiTweaks, updateNode } = useStore();
+    const { aiHistory, sendAIChat, selectedIds, aiTweaks, updateNode, pages, currentPageId } = useStore();
+
+    const applyNestedPropertyUpdate = (targetId: string, propertyPath: string, value: unknown) => {
+        const currentPage = pages.find((page) => page.id === currentPageId);
+        const node = currentPage?.nodes.find((item) => item.id === targetId);
+        if (!node) return;
+
+        const isNestedPath = propertyPath.includes('.') || propertyPath.includes('[');
+        if (!isNestedPath) {
+            updateNode(targetId, { [propertyPath]: value } as Partial<SceneNode>);
+            return;
+        }
+
+        const tokens: Array<string | number> = [];
+        const regex = /([^[.\]]+)|\[(\d+)\]/g;
+        let match: RegExpExecArray | null = regex.exec(propertyPath);
+        while (match) {
+            if (match[1] !== undefined) tokens.push(match[1]);
+            if (match[2] !== undefined) tokens.push(Number(match[2]));
+            match = regex.exec(propertyPath);
+        }
+
+        if (tokens.length === 0 || typeof tokens[0] !== 'string') return;
+
+        const rootKey = tokens[0];
+        const cloned = JSON.parse(JSON.stringify(node)) as SceneNode;
+
+        let pointer: Record<string, unknown> | unknown[] = cloned as unknown as Record<string, unknown>;
+        for (let i = 0; i < tokens.length - 1; i++) {
+            const token = tokens[i];
+            const nextToken = tokens[i + 1];
+
+            if (typeof token === 'number') {
+                const arr = pointer as unknown[];
+                if (arr[token] === undefined) {
+                    arr[token] = typeof nextToken === 'number' ? [] : {};
+                }
+                pointer = arr[token] as Record<string, unknown> | unknown[];
+            } else {
+                const obj = pointer as Record<string, unknown>;
+                if (obj[token] === undefined || obj[token] === null) {
+                    obj[token] = typeof nextToken === 'number' ? [] : {};
+                }
+                pointer = obj[token] as Record<string, unknown> | unknown[];
+            }
+        }
+
+        const finalToken = tokens[tokens.length - 1];
+        if (typeof finalToken === 'number') {
+            (pointer as unknown[])[finalToken] = value;
+        } else {
+            (pointer as Record<string, unknown>)[finalToken] = value;
+        }
+
+        const updates: Partial<SceneNode> = { [rootKey]: (cloned as unknown as Record<string, unknown>)[rootKey] } as Partial<SceneNode>;
+
+        if (rootKey === 'fills') {
+            const nextFills = ((cloned as unknown as Record<string, unknown>).fills as Array<Record<string, unknown>> | undefined) || [];
+            const topSolid = [...nextFills].reverse().find((paint) => paint.type === 'solid' && typeof paint.color === 'string');
+            if (topSolid?.color) {
+                (updates as unknown as Record<string, unknown>).fill = topSolid.color;
+            }
+        }
+
+        if (rootKey === 'strokes') {
+            const nextStrokes = ((cloned as unknown as Record<string, unknown>).strokes as Array<Record<string, unknown>> | undefined) || [];
+            const topSolid = [...nextStrokes].reverse().find((paint) => paint.type === 'solid' && typeof paint.color === 'string');
+            if (topSolid?.color) {
+                (updates as unknown as Record<string, unknown>).stroke = topSolid.color;
+            }
+        }
+
+        updateNode(targetId, updates);
+    };
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -175,7 +248,7 @@ export const NovaAI = () => {
                                         onChange={(e) => {
                                             const val = parseFloat(e.target.value);
                                             const targetId = tweak.targetNodeId === 'Selection' ? selectedIds[0] : tweak.targetNodeId;
-                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as Partial<SceneNode>);
+                                            if (targetId) applyNestedPropertyUpdate(targetId, tweak.targetProperty, val);
                                             useStore.setState(s => ({
                                                 aiTweaks: s.aiTweaks.map(at => at.id === tweak.id ? { ...at, value: val } : at)
                                             }));
@@ -190,7 +263,7 @@ export const NovaAI = () => {
                                         onChange={(e) => {
                                             const val = e.target.value;
                                             const targetId = tweak.targetNodeId === 'Selection' ? selectedIds[0] : tweak.targetNodeId;
-                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as Partial<SceneNode>);
+                                            if (targetId) applyNestedPropertyUpdate(targetId, tweak.targetProperty, val);
                                             useStore.setState(s => ({
                                                 aiTweaks: s.aiTweaks.map(at => at.id === tweak.id ? { ...at, value: val } : at)
                                             }));

@@ -1,5 +1,196 @@
-import { SceneNode, createDefaultNode, FrameNode, TextNode, RectNode, ImageNode } from '../types';
+import { SceneNode, createDefaultNode, FrameNode, TextNode, RectNode, ImageNode, Paint } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+
+const splitTopLevel = (value: string): string[] => {
+  const result: string[] = [];
+  let depth = 0;
+  let token = '';
+
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+
+    if (ch === ',' && depth === 0) {
+      if (token.trim()) result.push(token.trim());
+      token = '';
+      continue;
+    }
+    token += ch;
+  }
+
+  if (token.trim()) result.push(token.trim());
+  return result;
+};
+
+const splitStopToken = (stop: string): { color: string; offset?: number } => {
+  let depth = 0;
+  let splitIndex = -1;
+  for (let i = stop.length - 1; i >= 0; i--) {
+    const ch = stop[i];
+    if (ch === ')') depth += 1;
+    if (ch === '(') depth = Math.max(0, depth - 1);
+    if (depth === 0 && ch === ' ') {
+      splitIndex = i;
+      break;
+    }
+  }
+
+  if (splitIndex === -1) return { color: stop.trim() };
+  const color = stop.slice(0, splitIndex).trim();
+  const offsetToken = stop.slice(splitIndex + 1).trim();
+  const pct = offsetToken.match(/^(-?\d+(?:\.\d+)?)%$/);
+  if (pct) {
+    return { color, offset: Math.min(1, Math.max(0, Number(pct[1]) / 100)) };
+  }
+
+  const normalized = Number(offsetToken);
+  if (Number.isFinite(normalized)) {
+    return { color, offset: Math.min(1, Math.max(0, normalized)) };
+  }
+
+  return { color: stop.trim() };
+};
+
+const extractAlpha = (color: string): { color: string; opacity: number } => {
+  const rgba = color.replace(/\s+/g, '').match(/^rgba\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)$/i);
+  if (rgba) {
+    const r = Math.min(255, Math.max(0, Number(rgba[1])));
+    const g = Math.min(255, Math.max(0, Number(rgba[2])));
+    const b = Math.min(255, Math.max(0, Number(rgba[3])));
+    const a = Math.min(1, Math.max(0, Number(rgba[4])));
+    return { color: `rgb(${Math.round(r)} ${Math.round(g)} ${Math.round(b)})`, opacity: a };
+  }
+
+  const hex = color.trim().match(/^#([\da-fA-F]{8})$/);
+  if (hex) {
+    const raw = hex[1];
+    const base = `#${raw.slice(0, 6)}`;
+    const alpha = parseInt(raw.slice(6, 8), 16) / 255;
+    return { color: base, opacity: alpha };
+  }
+
+  return { color, opacity: 1 };
+};
+
+const parseGradientStops = (tokens: string[]): { offset: number; color: string }[] => {
+  const parsed = tokens.map((token) => splitStopToken(token));
+  if (parsed.length === 0) {
+    return [
+      { offset: 0, color: '#FFFFFF' },
+      { offset: 1, color: '#000000' },
+    ];
+  }
+
+  const withOffsets = parsed.map((stop, index) => {
+    if (stop.offset !== undefined) return { offset: stop.offset, color: stop.color };
+    if (parsed.length === 1) return { offset: 0, color: stop.color };
+    return { offset: index / (parsed.length - 1), color: stop.color };
+  });
+
+  return withOffsets.map((stop) => ({
+    offset: Math.min(1, Math.max(0, stop.offset)),
+    color: stop.color,
+  }));
+};
+
+const parseLinearGradientAngle = (token: string): number => {
+  const trimmed = token.trim().toLowerCase();
+  const deg = trimmed.match(/^(-?\d+(?:\.\d+)?)deg$/);
+  if (deg) return Number(deg[1]);
+
+  if (trimmed.startsWith('to ')) {
+    const direction = trimmed.replace(/^to\s+/, '');
+    if (direction === 'right') return 0;
+    if (direction === 'bottom') return 90;
+    if (direction === 'left') return 180;
+    if (direction === 'top') return -90;
+    if (direction === 'bottom right' || direction === 'right bottom') return 45;
+    if (direction === 'bottom left' || direction === 'left bottom') return 135;
+    if (direction === 'top left' || direction === 'left top') return -135;
+    if (direction === 'top right' || direction === 'right top') return -45;
+  }
+
+  return 0;
+};
+
+const parseBackgroundPaints = (style: CSSStyleDeclaration): Paint[] => {
+  const paints: Paint[] = [];
+
+  const bgColor = style.backgroundColor;
+  const { color: normalizedBgColor, opacity: bgOpacity } = extractAlpha(bgColor);
+  if (bgColor && bgColor !== 'transparent' && bgColor !== 'rgba(0, 0, 0, 0)' && bgOpacity > 0) {
+    paints.push({
+      id: uuidv4(),
+      type: 'solid',
+      color: normalizedBgColor,
+      opacity: bgOpacity,
+      visible: true,
+    });
+  }
+
+  const bgImage = style.backgroundImage;
+  if (!bgImage || bgImage === 'none') return paints;
+
+  const layers = splitTopLevel(bgImage);
+  const parsedLayers: Paint[] = [];
+
+  layers.forEach((layer) => {
+    const linearMatch = layer.match(/^linear-gradient\((.*)\)$/i);
+    if (linearMatch) {
+      const parts = splitTopLevel(linearMatch[1]);
+      const looksLikeAngle = parts[0] && (parts[0].includes('deg') || parts[0].trim().toLowerCase().startsWith('to '));
+      const angle = looksLikeAngle ? parseLinearGradientAngle(parts[0]) : 0;
+      const stopTokens = looksLikeAngle ? parts.slice(1) : parts;
+      parsedLayers.push({
+        id: uuidv4(),
+        type: 'gradient-linear',
+        gradientAngle: angle,
+        gradientStops: parseGradientStops(stopTokens),
+        opacity: 1,
+        visible: true,
+      });
+      return;
+    }
+
+    const radialMatch = layer.match(/^radial-gradient\((.*)\)$/i);
+    if (radialMatch) {
+      const parts = splitTopLevel(radialMatch[1]);
+      let center = { x: 0.5, y: 0.5 };
+      let radius = 0.5;
+      let stopStart = 0;
+
+      const first = parts[0]?.toLowerCase() || '';
+      if (first.includes(' at ')) {
+        stopStart = 1;
+        const atMatch = first.match(/at\s+(-?\d+(?:\.\d+)?)%\s+(-?\d+(?:\.\d+)?)%/);
+        if (atMatch) {
+          center = {
+            x: Math.min(1, Math.max(0, Number(atMatch[1]) / 100)),
+            y: Math.min(1, Math.max(0, Number(atMatch[2]) / 100)),
+          };
+        }
+        const radiusMatch = first.match(/(\d+(?:\.\d+)?)%/);
+        if (radiusMatch) {
+          radius = Math.min(1, Math.max(0.05, Number(radiusMatch[1]) / 100));
+        }
+      }
+
+      parsedLayers.push({
+        id: uuidv4(),
+        type: 'gradient-radial',
+        gradientCenter: center,
+        gradientRadius: radius,
+        gradientStops: parseGradientStops(parts.slice(stopStart)),
+        opacity: 1,
+        visible: true,
+      });
+    }
+  });
+
+  // CSS renders first background layer on top. In Nova, last fill is top-most.
+  return [...paints, ...parsedLayers.reverse()];
+};
 
 export const parseHTMLToNodes = (html: string, basePosition: { x: number, y: number }): SceneNode[] => {
   // Use a temporary hidden container in the real DOM for accurate style/layout calculation
@@ -162,10 +353,16 @@ export const parseHTMLToNodes = (html: string, basePosition: { x: number, y: num
     }
 
     if (node) {
-      // Sync legacy fill/stroke with new multi-paint system
-      if (node.fill) {
+      // Sync background paints into the multi-layer fill model.
+      const parsedPaints = parseBackgroundPaints(style);
+      if (parsedPaints.length > 0) {
+        node.fills = parsedPaints;
+        const topSolid = [...parsedPaints].reverse().find((paint) => paint.type === 'solid');
+        if (topSolid?.color) node.fill = topSolid.color;
+      } else if (node.fill) {
         node.fills = [{ id: uuidv4(), type: 'solid', color: node.fill, opacity: node.opacity || 1, visible: true }];
       }
+
       if (node.stroke && node.strokeWidth > 0) {
         node.strokes = [{ id: uuidv4(), type: 'solid', color: node.stroke, opacity: 1, visible: true }];
       }
