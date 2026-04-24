@@ -1,0 +1,6 @@
+{
+  "name": "Nova Design Engine",
+  "description": "Spatial design platform with on-canvas rulers, redline measurements, auto-layout heuristics, and systemic component hierarchies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["Graphics", "Vector Design", "Scene Management"]
+}
