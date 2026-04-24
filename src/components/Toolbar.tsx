@@ -1,27 +1,113 @@
-import { Square, Circle, Type, MousePointer2, MousePointer, Hand, ZoomIn, Undo, Redo, PenTool, Layout, Maximize, Sparkles, Image, Download, Printer, FileCode, Camera } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type Konva from 'konva';
+import type { LucideIcon } from 'lucide-react';
+import { Camera, ChevronDown, Circle, Download, FileCode, Hand, Image, Layout, Maximize, MousePointer, MousePointer2, PenTool, Printer, Redo, Sparkles, Square, Type, Undo, ZoomIn } from 'lucide-react';
 import { useStore } from '../store';
 import { ToolType } from '../types';
 import { exportToPDF, exportToSVG, triggerDownload } from '../services/exportService';
-import { useState } from 'react';
+
+declare global {
+  interface Window {
+    canvasStage?: Konva.Stage;
+  }
+}
+
+type ExportKind = 'pdf-digital-single' | 'pdf-digital-frames' | 'pdf-print' | 'svg' | 'png';
+
+interface ToolOption {
+  id: ToolType;
+  icon: LucideIcon;
+  label: string;
+  shortcut: string;
+}
+
+interface ToolGroup {
+  id: 'cursor' | 'shape' | 'container' | 'draw' | 'view';
+  label: string;
+  options: ToolOption[];
+}
+
+const TOOL_GROUPS: ToolGroup[] = [
+  {
+    id: 'cursor',
+    label: 'Select',
+    options: [
+      { id: 'select', icon: MousePointer2, label: 'Select', shortcut: 'V' },
+      { id: 'direct-select', icon: MousePointer, label: 'Direct Select', shortcut: 'A' },
+      { id: 'scale', icon: Maximize, label: 'Scale', shortcut: 'K' },
+    ],
+  },
+  {
+    id: 'shape',
+    label: 'Shapes',
+    options: [
+      { id: 'rect', icon: Square, label: 'Rectangle', shortcut: 'R' },
+      { id: 'circle', icon: Circle, label: 'Circle', shortcut: 'O' },
+      { id: 'ellipse', icon: Circle, label: 'Ellipse', shortcut: 'E' },
+    ],
+  },
+  {
+    id: 'container',
+    label: 'Containers',
+    options: [
+      { id: 'frame', icon: Layout, label: 'Frame', shortcut: 'F' },
+      { id: 'section', icon: Layout, label: 'Section', shortcut: 'S' },
+    ],
+  },
+  {
+    id: 'draw',
+    label: 'Draw',
+    options: [
+      { id: 'pen', icon: PenTool, label: 'Pen', shortcut: 'P' },
+      { id: 'text', icon: Type, label: 'Text', shortcut: 'T' },
+      { id: 'image', icon: Image, label: 'Image', shortcut: 'I' },
+    ],
+  },
+  {
+    id: 'view',
+    label: 'View',
+    options: [
+      { id: 'hand', icon: Hand, label: 'Hand', shortcut: 'H' },
+      { id: 'zoom', icon: ZoomIn, label: 'Zoom', shortcut: 'Z' },
+    ],
+  },
+];
 
 export const Toolbar = () => {
   const { pages, currentPageId, tool, setTool, undo, redo, historyIndex, history } = useStore();
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const [openGroup, setOpenGroup] = useState<ToolGroup['id'] | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   const currentPage = pages.find(p => p.id === currentPageId);
 
-  const handleExport = async (type: string) => {
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      if (!dockRef.current) return;
+      if (dockRef.current.contains(event.target as Node)) return;
+      setOpenGroup(null);
+      setShowExportMenu(false);
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, []);
+
+  const handleExport = async (type: ExportKind) => {
     if (!currentPage || isExporting) return;
     
     setIsExporting(true);
     try {
       switch(type) {
-        case 'pdf-digital':
-          await exportToPDF(currentPage.nodes, { type: 'digital' });
+        case 'pdf-digital-single':
+          await exportToPDF(currentPage.nodes, { type: 'digital', mode: 'single' });
+          break;
+        case 'pdf-digital-frames':
+          await exportToPDF(currentPage.nodes, { type: 'digital', mode: 'frames' });
           break;
         case 'pdf-print':
-          await exportToPDF(currentPage.nodes, { type: 'print' });
+          await exportToPDF(currentPage.nodes, { type: 'print', mode: 'frames' });
           break;
         case 'svg':
           const svg = exportToSVG(currentPage.nodes);
@@ -30,7 +116,7 @@ export const Toolbar = () => {
           triggerDownload(svgUrl, 'export.svg');
           break;
         case 'png':
-          const stage = (window as any).canvasStage;
+          const stage = window.canvasStage;
           if (stage) {
               const dataUrl = stage.toDataURL({ pixelRatio: 3 });
               triggerDownload(dataUrl, 'export.png');
@@ -46,127 +132,161 @@ export const Toolbar = () => {
     }
   };
 
-  const tools: { id: ToolType; icon: any; label: string; shortcut: string }[] = [
-    { id: 'select', icon: MousePointer2, label: 'Select', shortcut: 'V' },
-    { id: 'direct-select', icon: MousePointer, label: 'Direct Selection', shortcut: 'A' },
-    { id: 'scale', icon: Maximize, label: 'Scale', shortcut: 'K' },
-    { id: 'pen', icon: PenTool, label: 'Pen', shortcut: 'P' },
-    { id: 'frame', icon: Layout, label: 'Frame', shortcut: 'F' },
-    { id: 'rect', icon: Square, label: 'Rectangle', shortcut: 'R' },
-    { id: 'circle', icon: Circle, label: 'Circle', shortcut: 'O' },
-    { id: 'ellipse', icon: Circle, label: 'Ellipse', shortcut: 'E' },
-    { id: 'text', icon: Type, label: 'Text', shortcut: 'T' },
-    { id: 'image', icon: Image, label: 'Image', shortcut: 'I' },
-    { id: 'hand', icon: Hand, label: 'Hand', shortcut: 'H' },
-    { id: 'zoom', icon: ZoomIn, label: 'Zoom', shortcut: 'Z' },
-  ];
+  const activeToolByGroup = useMemo(() => {
+    const result = new Map<ToolGroup['id'], ToolOption>();
+    TOOL_GROUPS.forEach((group) => {
+      const selected = group.options.find((option) => option.id === tool) || group.options[0];
+      result.set(group.id, selected);
+    });
+    return result;
+  }, [tool]);
 
   return (
-    <div 
-      id="floating-toolbar" 
-      className="absolute left-6 top-1/2 -translate-y-1/2 w-11 flex flex-col gap-1 bg-[#141414] border border-[#2A2A2A] p-1.5 rounded-xl shadow-2xl z-20 backdrop-blur-md bg-opacity-90"
-    >
-      {tools.map((t) => (
-        <button
-          key={t.id}
-          id={`tool-${t.id}`}
-          onClick={() => setTool(t.id)}
-          title={`${t.label} (${t.shortcut})`}
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200 group relative ${
-            tool === t.id 
-              ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.5)] scale-110' 
-              : 'text-[#A1A1A1] hover:bg-[#2A2A2A] hover:text-white'
-          }`}
-        >
-          <t.icon size={16} strokeWidth={2.5} />
-          {/* Shortcut tooltip on hover */}
-          <span className="absolute left-12 px-2 py-1 bg-[#0A0A0A] border border-[#2A2A2A] rounded text-[10px] text-[#A1A1A1] opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity font-mono uppercase whitespace-nowrap">
-            {t.label} <span className="text-white ml-2">{t.shortcut}</span>
-          </span>
-        </button>
-      ))}
-      
-      <div className="h-px bg-[#2A2A2A] mx-1 my-2"></div>
-      
-      <button
-        id="nova-ai-btn"
-        onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', ctrlKey: true }))}
-        title="Nova AI (Ctrl+I)"
-        className="w-8 h-8 flex items-center justify-center text-indigo-400 hover:bg-indigo-600/20 hover:text-indigo-300 transition-colors rounded-lg relative group"
+    <div className="absolute bottom-4 left-1/2 z-30 -translate-x-1/2">
+      <div
+        ref={dockRef}
+        id="floating-toolbar"
+        className="group relative translate-y-3 rounded-2xl border border-[#2A2A2A] bg-[#121212]/95 p-2 shadow-2xl backdrop-blur-md transition-all duration-200 hover:translate-y-0"
       >
-        <Sparkles size={16} strokeWidth={2.5} />
-        <span className="absolute left-12 px-2 py-1 bg-[#0A0A0A] border border-[#2A2A2A] rounded text-[10px] text-[#A1A1A1] opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity font-mono uppercase whitespace-nowrap">
-          Nova AI <span className="text-white ml-2">CTRL I</span>
-        </span>
-      </button>
+        <div className="flex items-center gap-2">
+          <button
+            id="undo-btn"
+            onClick={undo}
+            disabled={historyIndex === 0}
+            title="Undo (Ctrl+Z)"
+            className="h-8 w-8 rounded-lg border border-transparent text-[#A1A1A1] transition-colors hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white disabled:opacity-20"
+          >
+            <Undo size={14} className="mx-auto" />
+          </button>
+          <button
+            id="redo-btn"
+            onClick={redo}
+            disabled={historyIndex >= history.length - 1}
+            title="Redo (Ctrl+Shift+Z)"
+            className="h-8 w-8 rounded-lg border border-transparent text-[#A1A1A1] transition-colors hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white disabled:opacity-20"
+          >
+            <Redo size={14} className="mx-auto" />
+          </button>
 
-      <div className="h-px bg-[#2A2A2A] mx-1 my-2"></div>
-      
-      <button
-        id="undo-btn"
-        onClick={undo}
-        disabled={historyIndex === 0}
-        title="Undo (Ctrl+Z)"
-        className="w-8 h-8 flex items-center justify-center text-[#A1A1A1] hover:bg-[#2A2A2A] hover:text-white disabled:opacity-20 transition-colors rounded-lg"
-      >
-        <Undo size={14} />
-      </button>
-      <button
-        id="redo-btn"
-        onClick={redo}
-        disabled={historyIndex >= history.length - 1}
-        title="Redo (Ctrl+Shift+Z)"
-        className="w-8 h-8 flex items-center justify-center text-[#A1A1A1] hover:bg-[#2A2A2A] hover:text-white disabled:opacity-20 transition-colors rounded-lg"
-      >
-        <Redo size={14} />
-      </button>
-      
-      <div className="h-px bg-[#2A2A2A] mx-1 my-2"></div>
+          <div className="mx-1 h-5 w-px bg-[#2A2A2A]" />
 
-      <div className="relative">
-        <button
-          id="export-trigger"
-          onClick={() => setShowExportMenu(!showExportMenu)}
-          disabled={isExporting}
-          title="Export"
-          className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
-            isExporting ? 'bg-indigo-600/50 cursor-wait' : showExportMenu ? 'bg-indigo-600 text-white' : 'text-[#A1A1A1] hover:bg-[#2A2A2A] hover:text-white'
-          }`}
-        >
-          {isExporting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> : <Download size={14} />}
-        </button>
+          {TOOL_GROUPS.map((group) => {
+            const active = activeToolByGroup.get(group.id) || group.options[0];
+            const ActiveIcon = active.icon;
+            const isOpen = openGroup === group.id;
 
-        {showExportMenu && !isExporting && (
-          <div className="absolute left-12 bottom-0 w-48 bg-[#0A0A0A] border border-[#2A2A2A] rounded-xl shadow-2xl p-1 flex flex-col z-50">
-            <div className="px-3 py-1.5 text-[10px] text-[#555] font-bold uppercase tracking-widest">Digital PDF</div>
-            <button onClick={() => handleExport('pdf-digital')} className="flex items-center gap-3 px-3 py-2 text-xs text-[#BCBCBC] hover:bg-[#222] hover:text-white rounded-lg transition-colors group">
-              <Download size={14} className="text-indigo-400 group-hover:text-indigo-300" />
-              <span>Standard (Single Page)</span>
-            </button>
-            <button onClick={() => handleExport('pdf-digital')} className="flex items-center gap-3 px-3 py-2 text-xs text-[#BCBCBC] hover:bg-[#222] hover:text-white rounded-lg transition-colors group">
-              <FileCode size={14} className="text-emerald-400 group-hover:text-emerald-300" />
-              <span>Frames to Pages</span>
+            return (
+              <div key={group.id} className="relative">
+                <button
+                  id={`tool-group-${group.id}`}
+                  onClick={() => {
+                    setOpenGroup((prev) => (prev === group.id ? null : group.id));
+                    setShowExportMenu(false);
+                  }}
+                  className={`flex h-8 items-center gap-1.5 rounded-lg border px-2 text-xs transition-colors ${
+                    isOpen ? 'border-indigo-500/50 bg-indigo-600/20 text-white' : 'border-transparent bg-transparent text-[#C4C4C4] hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white'
+                  }`}
+                  title={`${group.label} tools`}
+                >
+                  <ActiveIcon size={14} />
+                  <ChevronDown size={11} className={`opacity-50 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {isOpen && (
+                  <div className="absolute bottom-full left-1/2 mb-2 w-48 -translate-x-1/2 rounded-xl border border-[#2A2A2A] bg-[#0B0B0B] p-1 shadow-2xl">
+                    {group.options.map((option) => {
+                      const Icon = option.icon;
+                      const selected = tool === option.id;
+                      return (
+                        <button
+                          key={option.id}
+                          id={`tool-${option.id}`}
+                          onClick={() => {
+                            setTool(option.id);
+                            setOpenGroup(null);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
+                            selected ? 'bg-indigo-600 text-white' : 'text-[#C4C4C4] hover:bg-[#1F1F1F] hover:text-white'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <Icon size={13} />
+                            {option.label}
+                          </span>
+                          <span className="font-mono text-[10px] uppercase opacity-80">{option.shortcut}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div className="mx-1 h-5 w-px bg-[#2A2A2A]" />
+
+          <button
+            id="nova-ai-btn"
+            onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', ctrlKey: true }))}
+            title="Nova AI (Ctrl+I)"
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-transparent px-2 text-xs text-indigo-300 transition-colors hover:border-indigo-500/40 hover:bg-indigo-600/20 hover:text-indigo-200"
+          >
+            <Sparkles size={14} />
+          </button>
+
+          <div className="relative">
+            <button
+              id="export-trigger"
+              onClick={() => {
+                setShowExportMenu((prev) => !prev);
+                setOpenGroup(null);
+              }}
+              disabled={isExporting}
+              title="Export"
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2 text-xs transition-colors ${
+                isExporting
+                  ? 'cursor-wait border-indigo-500/40 bg-indigo-600/30 text-white'
+                  : showExportMenu
+                    ? 'border-emerald-500/50 bg-emerald-600/20 text-white'
+                    : 'border-transparent text-[#C4C4C4] hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white'
+              }`}
+            >
+              {isExporting ? <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <Download size={14} />}
             </button>
 
-            <div className="h-px bg-[#222] my-1"></div>
-            <div className="px-3 py-1.5 text-[10px] text-[#555] font-bold uppercase tracking-widest">Professional Print</div>
-            <button onClick={() => handleExport('pdf-print')} className="flex items-center gap-3 px-3 py-2 text-xs text-[#BCBCBC] hover:bg-[#222] hover:text-white rounded-lg transition-colors group">
-              <Printer size={14} className="text-orange-400 group-hover:text-orange-300" />
-              <span>Bleed & Crop Marks</span>
-            </button>
+            {showExportMenu && !isExporting && (
+              <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-[#2A2A2A] bg-[#0A0A0A] p-1 shadow-2xl">
+                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#555]">Digital PDF</div>
+                <button onClick={() => handleExport('pdf-digital-single')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs text-[#BCBCBC] transition-colors hover:bg-[#222] hover:text-white">
+                  <Download size={14} className="text-indigo-400" />
+                  <span>Standard (Single Page)</span>
+                </button>
+                <button onClick={() => handleExport('pdf-digital-frames')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs text-[#BCBCBC] transition-colors hover:bg-[#222] hover:text-white">
+                  <FileCode size={14} className="text-emerald-400" />
+                  <span>Frames to Pages</span>
+                </button>
 
-            <div className="h-px bg-[#222] my-1"></div>
-            <div className="px-3 py-1.5 text-[10px] text-[#555] font-bold uppercase tracking-widest">Assets</div>
-            <button onClick={() => handleExport('svg')} className="flex items-center gap-3 px-3 py-2 text-xs text-[#BCBCBC] hover:bg-[#222] hover:text-white rounded-lg transition-colors group">
-              <FileCode size={14} className="text-sky-400 group-hover:text-sky-300" />
-              <span>Vector (SVG)</span>
-            </button>
-            <button onClick={() => handleExport('png')} className="flex items-center gap-3 px-3 py-2 text-xs text-[#BCBCBC] hover:bg-[#222] hover:text-white rounded-lg transition-colors group">
-              <Camera size={14} className="text-rose-400 group-hover:text-rose-300" />
-              <span>Raster (PNG @2x)</span>
-            </button>
+                <div className="my-1 h-px bg-[#222]" />
+                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#555]">Professional Print</div>
+                <button onClick={() => handleExport('pdf-print')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs text-[#BCBCBC] transition-colors hover:bg-[#222] hover:text-white">
+                  <Printer size={14} className="text-orange-400" />
+                  <span>Bleed & Crop Marks</span>
+                </button>
+
+                <div className="my-1 h-px bg-[#222]" />
+                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#555]">Assets</div>
+                <button onClick={() => handleExport('svg')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs text-[#BCBCBC] transition-colors hover:bg-[#222] hover:text-white">
+                  <FileCode size={14} className="text-sky-400" />
+                  <span>Vector (SVG)</span>
+                </button>
+                <button onClick={() => handleExport('png')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-xs text-[#BCBCBC] transition-colors hover:bg-[#222] hover:text-white">
+                  <Camera size={14} className="text-rose-400" />
+                  <span>Raster (PNG @2x)</span>
+                </button>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

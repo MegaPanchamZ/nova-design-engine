@@ -1,7 +1,8 @@
 import paper from 'paper';
+import { SceneNode } from '../types';
 
 export const performBooleanOperation = (
-  nodes: any[], 
+  nodes: SceneNode[], 
   operation: 'union' | 'subtract' | 'intersect' | 'exclude'
 ): string => {
   // Initialize paper if not already (it needs a hidden canvas or project)

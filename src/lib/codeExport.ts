@@ -5,7 +5,7 @@ export const exportToCode = (nodes: SceneNode[]): string => {
         const children = nodes.filter(n => n.parentId === id);
         return children.map(n => {
             let classes = ``;
-            let style: any = {};
+            const style: Record<string, string | number> = {};
             
             // Basic layout
             if (n.parentId) {
@@ -37,7 +37,7 @@ export const exportToCode = (nodes: SceneNode[]): string => {
                 return `      <div style={${JSON.stringify(style)}}>\n        ${tn.text}\n      </div>`;
             }
 
-            if (n.type === 'frame') {
+            if (n.type === 'frame' || n.type === 'section') {
                 const fn = n as FrameNode;
                 if (fn.layoutMode !== 'none') {
                     style.display = 'flex';

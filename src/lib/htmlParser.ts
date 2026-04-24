@@ -87,9 +87,9 @@ export const parseHTMLToNodes = (html: string, basePosition: { x: number, y: num
             left: parseFloat(style.paddingLeft) || 0
         };
         const jc = style.justifyContent;
-        frame.justifyContent = (jc.includes('start') ? 'start' : jc.includes('end') ? 'end' : jc.includes('center') ? 'center' : jc.includes('between') ? 'space-between' : 'start') as any;
+        frame.justifyContent = jc.includes('start') ? 'start' : jc.includes('end') ? 'end' : jc.includes('center') ? 'center' : jc.includes('between') ? 'space-between' : 'start';
         const ai = style.alignItems;
-        frame.alignItems = (ai.includes('start') ? 'start' : ai.includes('end') ? 'end' : ai.includes('center') ? 'center' : ai.includes('stretch') ? 'stretch' : 'start') as any;
+        frame.alignItems = ai.includes('start') ? 'start' : ai.includes('end') ? 'end' : ai.includes('center') ? 'center' : ai.includes('stretch') ? 'stretch' : 'start';
       }
       node = frame;
     } else if (isTextTag) {
@@ -130,11 +130,11 @@ export const parseHTMLToNodes = (html: string, basePosition: { x: number, y: num
     }
 
     const textAlign = style.textAlign;
-    text.align = (textAlign.includes('center') ? 'center' : (textAlign.includes('right') || textAlign.includes('end')) ? 'right' : 'left') as any;
+    text.align = textAlign.includes('center') ? 'center' : (textAlign.includes('right') || textAlign.includes('end')) ? 'right' : 'left';
     
     const writingMode = style.writingMode;
-    if (writingMode && writingMode.includes('vertical')) {
-        (text as any).writingMode = writingMode;
+    if (writingMode === 'vertical-rl' || writingMode === 'vertical-lr' || writingMode === 'horizontal-tb') {
+      text.writingMode = writingMode;
     }
 
     if (element.getAttribute('data-mask') === 'true') text.isMask = true;

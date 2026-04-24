@@ -1,14 +1,19 @@
 export const getSuperellipsePath = (width: number, height: number, radius: number, smoothing: number): string => {
+  const safeWidth = Math.max(1, Math.abs(Number.isFinite(width) ? width : 1));
+  const safeHeight = Math.max(1, Math.abs(Number.isFinite(height) ? height : 1));
+  const maxRadius = Math.min(safeWidth, safeHeight) / 2;
+  const safeRadius = Math.min(maxRadius, Math.max(0, Number.isFinite(radius) ? radius : 0));
+
   if (smoothing <= 0) {
     // Normal rect with some radius
-    return `M ${radius} 0 L ${width - radius} 0 A ${radius} ${radius} 0 0 1 ${width} ${radius} L ${width} ${height - radius} A ${radius} ${radius} 0 0 1 ${width - radius} ${height} L ${radius} ${height} A ${radius} ${radius} 0 0 1 0 ${height - radius} L 0 ${radius} A ${radius} ${radius} 0 0 1 ${radius} 0 Z`;
+    return `M ${safeRadius} 0 L ${safeWidth - safeRadius} 0 A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth} ${safeRadius} L ${safeWidth} ${safeHeight - safeRadius} A ${safeRadius} ${safeRadius} 0 0 1 ${safeWidth - safeRadius} ${safeHeight} L ${safeRadius} ${safeHeight} A ${safeRadius} ${safeRadius} 0 0 1 0 ${safeHeight - safeRadius} L 0 ${safeRadius} A ${safeRadius} ${safeRadius} 0 0 1 ${safeRadius} 0 Z`;
   }
 
   // Approximation of Figma's corner smoothing
   // We use a cubic bezier approximation for the super-ellipse
   // The 'smoothing' factor pushes the control points of the corner further into the straight lines
   const s = Math.min(Math.max(smoothing, 0), 1);
-  const r = Math.min(radius, Math.min(width, height) / 2);
+  const r = safeRadius;
   
   // Extension factor for the curve
   const e = r * (1 + s);
@@ -21,12 +26,12 @@ export const getSuperellipsePath = (width: number, height: number, radius: numbe
 
   return `
     M ${e} 0
-    L ${width - e} 0
-    C ${width - e + e*k} 0, ${width} ${e - e*k}, ${width} ${e}
-    L ${width} ${height - e}
-    C ${width} ${height - e + e*k}, ${width - e + e*k} ${height}, ${width - e} ${height}
-    L ${e} ${height}
-    C ${e - e*k} ${height}, 0 ${height - e + e*k}, 0 ${height - e}
+    L ${safeWidth - e} 0
+    C ${safeWidth - e + e*k} 0, ${safeWidth} ${e - e*k}, ${safeWidth} ${e}
+    L ${safeWidth} ${safeHeight - e}
+    C ${safeWidth} ${safeHeight - e + e*k}, ${safeWidth - e + e*k} ${safeHeight}, ${safeWidth - e} ${safeHeight}
+    L ${e} ${safeHeight}
+    C ${e - e*k} ${safeHeight}, 0 ${safeHeight - e + e*k}, 0 ${safeHeight - e}
     L 0 ${e}
     C 0 ${e - e*k}, ${e - e*k} 0, ${e} 0
     Z

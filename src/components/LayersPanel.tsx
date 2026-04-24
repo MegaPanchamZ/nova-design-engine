@@ -5,6 +5,8 @@ import { SceneNode, createDefaultNode, Page } from '../types';
 import {
   DndContext,
   closestCenter,
+    DragEndEvent,
+    DragStartEvent,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -22,6 +24,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 
 interface SortableLayerProps {
+    key?: React.Key;
     node: SceneNode;
     depth: number;
     isSelected: boolean;
@@ -163,6 +166,7 @@ const SortableLayer = ({ node, depth, isSelected, onSelect, onToggleVisibility, 
 };
 
 interface SortablePageProps {
+    key?: React.Key;
     page: Page;
     isActive: boolean;
     onSelect: (id: string) => void;
@@ -283,8 +287,8 @@ export const LayersPanel = () => {
 
   const flattened = getFlattenedNodes();
 
-  const handleDragStartAll = (event: any) => {
-    const id = event.active.id;
+    const handleDragStartAll = (event: DragStartEvent) => {
+        const id = String(event.active.id);
     if (pages.some(p => p.id === id)) {
         setActivePageId(id);
     } else {
@@ -292,7 +296,7 @@ export const LayersPanel = () => {
     }
   };
 
-  const handleDragEndAll = (event: any) => {
+    const handleDragEndAll = (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveLayerId(null);
     setActivePageId(null);
@@ -302,16 +306,18 @@ export const LayersPanel = () => {
     if (pages.some(p => p.id === active.id)) {
         // Page Reordering
         if (active.id !== over.id) {
-            const oldIdx = pages.findIndex(p => p.id === active.id);
-            const newIdx = pages.findIndex(p => p.id === over.id);
+            const activeId = String(active.id);
+            const overId = String(over.id);
+            const oldIdx = pages.findIndex(p => p.id === activeId);
+            const newIdx = pages.findIndex(p => p.id === overId);
             setPages(arrayMove(pages, oldIdx, newIdx));
             pushHistory();
         }
     } else {
         // Layer Reordering
         if (active.id !== over.id) {
-            const dragId = active.id;
-            const targetId = over.id;
+            const dragId = String(active.id);
+            const targetId = String(over.id);
             const targetNode = nodes.find(n => n.id === targetId);
 
             if (targetNode?.type === 'frame') {

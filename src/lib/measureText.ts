@@ -9,11 +9,12 @@ export const measureText = (text: string, fontSize: number, fontFamily: string, 
   
   try {
     const prepared = prepareWithSegments(text, fontString);
+    const preparedForLayout = prepared as unknown as Parameters<typeof layout>[0];
     
     if (!maxWidth || maxWidth === Infinity || maxWidth <= 0) {
       const naturalWidth = measureNaturalWidth(prepared);
       // Even with natural width, we might have hard breaks (\n)
-      const result = layout(prepared as any, naturalWidth + 2, lh);
+      const result = layout(preparedForLayout, naturalWidth + 2, lh);
       return {
         width: Math.ceil(naturalWidth) + 4, // 4px buffer total (padding + rendering)
         height: Math.ceil(result.height || lh)
@@ -22,7 +23,7 @@ export const measureText = (text: string, fontSize: number, fontFamily: string, 
       // Pass slightly less width to account for padding when measuring wrap
       const effectiveMaxWidth = Math.max(1, maxWidth - 4);
       const stats = measureLineStats(prepared, effectiveMaxWidth);
-      const result = layout(prepared as any, effectiveMaxWidth, lh);
+      const result = layout(preparedForLayout, effectiveMaxWidth, lh);
       
       return {
         width: Math.ceil(stats.maxLineWidth) + 4,

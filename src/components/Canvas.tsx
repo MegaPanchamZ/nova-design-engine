@@ -2,14 +2,70 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import { useStore } from '../store';
-import { createDefaultNode, SceneNode, TextNode } from '../types';
+import { createDefaultNode, Effect, ImageNode, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
 import Konva from 'konva';
 import { measureText } from '../lib/measureText';
 import { getSuperellipsePath } from '../lib/geometry';
 import { FigmaRulers } from './Rulers';
 
-const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps, viewport }: any) => {
+type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
+type CanvasMouseEvent = Konva.KonvaEventObject<MouseEvent>;
+type CanvasWheelEvent = Konva.KonvaEventObject<WheelEvent>;
+type DrawingTool = Extract<ToolType, 'rect' | 'circle' | 'ellipse' | 'text' | 'frame' | 'section' | 'image'>;
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  canvasX: number;
+  canvasY: number;
+}
+
+interface KonvaImageProps {
+  node: ImageNode;
+  konvaProps: React.ComponentProps<typeof Rect>;
+  selectionProps: React.ComponentProps<typeof Rect> | null;
+  hoverProps: React.ComponentProps<typeof Rect> | null;
+}
+
+interface SanitizedCorners {
+  topLeft: number;
+  topRight: number;
+  bottomRight: number;
+  bottomLeft: number;
+}
+
+const clampCornerValue = (value: number, fallback: number, maxCornerRadius: number): number => {
+  const safeFallback = Number.isFinite(fallback) ? fallback : 0;
+  if (!Number.isFinite(value)) return Math.min(maxCornerRadius, Math.max(0, safeFallback));
+  return Math.min(maxCornerRadius, Math.max(0, value));
+};
+
+const getSanitizedCornerData = (node: Pick<SceneNode, 'width' | 'height' | 'cornerRadius' | 'individualCornerRadius' | 'cornerSmoothing'>) => {
+  const safeWidth = Number.isFinite(node.width) ? Math.abs(node.width) : 0;
+  const safeHeight = Number.isFinite(node.height) ? Math.abs(node.height) : 0;
+  const maxCornerRadius = Math.max(0, Math.min(safeWidth, safeHeight) / 2);
+  const uniform = clampCornerValue(node.cornerRadius || 0, 0, maxCornerRadius);
+  const corners: SanitizedCorners = {
+    topLeft: clampCornerValue(node.individualCornerRadius?.topLeft ?? uniform, uniform, maxCornerRadius),
+    topRight: clampCornerValue(node.individualCornerRadius?.topRight ?? uniform, uniform, maxCornerRadius),
+    bottomRight: clampCornerValue(node.individualCornerRadius?.bottomRight ?? uniform, uniform, maxCornerRadius),
+    bottomLeft: clampCornerValue(node.individualCornerRadius?.bottomLeft ?? uniform, uniform, maxCornerRadius),
+  };
+
+  const smoothingRaw = Number.isFinite(node.cornerSmoothing) ? node.cornerSmoothing : 0;
+  const smoothing = Math.min(1, Math.max(0, smoothingRaw));
+
+  return {
+    uniform,
+    corners,
+    cornerRadiusArray: [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft] as [number, number, number, number],
+    smoothing,
+  };
+};
+
+const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps }: KonvaImageProps) => {
     const [img] = useImage(node.src, 'anonymous');
+    const cornerData = getSanitizedCornerData(node);
     
     const getScaleProps = () => {
         if (!img) return {};
@@ -64,23 +120,13 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps, viewport }: 
                 {...imageProps}
                 fill={!img ? '#E5E7EB' : undefined}
                 lineJoin="round"
-                cornerRadius={node.individualCornerRadius ? [
-                    node.individualCornerRadius.topLeft,
-                    node.individualCornerRadius.topRight,
-                    node.individualCornerRadius.bottomRight,
-                    node.individualCornerRadius.bottomLeft
-                ] : node.cornerRadius}
+              cornerRadius={cornerData.cornerRadiusArray}
             />
              {selectionProps && (
                 <Rect 
                     x={node.x} y={node.y} width={node.width} height={node.height}
                     rotation={node.rotation}
-                    cornerRadius={node.individualCornerRadius ? [
-                        node.individualCornerRadius.topLeft,
-                        node.individualCornerRadius.topRight,
-                        node.individualCornerRadius.bottomRight,
-                        node.individualCornerRadius.bottomLeft
-                    ] : node.cornerRadius}
+                cornerRadius={cornerData.cornerRadiusArray}
                     {...selectionProps}
                 />
             )}
@@ -88,12 +134,7 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps, viewport }: 
                 <Rect 
                     x={node.x} y={node.y} width={node.width} height={node.height}
                     rotation={node.rotation}
-                    cornerRadius={node.individualCornerRadius ? [
-                        node.individualCornerRadius.topLeft,
-                        node.individualCornerRadius.topRight,
-                        node.individualCornerRadius.bottomRight,
-                        node.individualCornerRadius.bottomLeft
-                    ] : node.cornerRadius}
+                cornerRadius={cornerData.cornerRadiusArray}
                     {...hoverProps}
                 />
             )}
@@ -104,7 +145,8 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps, viewport }: 
 export const Canvas = () => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setViewport, 
-    addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId 
+    addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
+    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste
   } = useStore();
   
   const currentPage = pages.find(p => p.id === currentPageId);
@@ -126,18 +168,17 @@ export const Canvas = () => {
   const [editingHeight, setEditingHeight] = useState<number | null>(null);
 
   // Pen Tool
-  const [penPoints, setPenPoints] = useState<{ x: number, y: number, cp1?: {x: number, y: number}, cp2?: {x: number, y: number} }[]>([]);
+  const [penPoints, setPenPoints] = useState<PenPoint[]>([]);
   const [isPenDragging, setIsPenDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
 
   useEffect(() => {
-    if (stageRef.current) {
-        (window as any).canvasStage = stageRef.current;
-    }
-  }, [stageRef.current]);
+    window.canvasStage = stageRef.current || undefined;
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -159,6 +200,9 @@ export const Canvas = () => {
         if (e.key === '.' || e.key === 'Decimal') {
             zoomToFitSelected();
         }
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
         if (e.key === 'Alt') setAltHeld(false);
@@ -172,7 +216,81 @@ export const Canvas = () => {
   }, []);
 
   // Tool Tool Handlers
-  const [draggedPointIndex, setDraggedPointIndex] = useState<{ nodeId: string, index: number } | null>(null);
+  type PathAnchor = { x: number; y: number; cpIn?: { x: number; y: number }; cpOut?: { x: number; y: number } };
+
+  const clampCoord = (value: number, fallback = 0) => {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(-1_000_000, Math.min(1_000_000, value));
+  };
+
+  const clampSize = (value: number, fallback = 1) => {
+    if (!Number.isFinite(value)) return Math.max(1, fallback);
+    return Math.max(1, Math.min(1_000_000, Math.abs(value)));
+  };
+
+  const parsePathData = (data: string): { anchors: PathAnchor[]; closed: boolean } => {
+    const tokens = data.match(/[MLCZmlcz]|-?\d*\.?\d+/g) || [];
+    const anchors: PathAnchor[] = [];
+    let i = 0;
+    let cmd = '';
+    let closed = false;
+
+    while (i < tokens.length) {
+      const token = tokens[i];
+      if (/^[MLCZmlcz]$/.test(token)) {
+        cmd = token.toUpperCase();
+        i += 1;
+        if (cmd === 'Z') {
+          closed = true;
+          continue;
+        }
+      }
+
+      if (!cmd) break;
+
+      if (cmd === 'M' || cmd === 'L') {
+        const x = Number(tokens[i++]);
+        const y = Number(tokens[i++]);
+        if (Number.isFinite(x) && Number.isFinite(y)) anchors.push({ x, y });
+        if (cmd === 'M') cmd = 'L';
+        continue;
+      }
+
+      if (cmd === 'C') {
+        const c1x = Number(tokens[i++]);
+        const c1y = Number(tokens[i++]);
+        const c2x = Number(tokens[i++]);
+        const c2y = Number(tokens[i++]);
+        const x = Number(tokens[i++]);
+        const y = Number(tokens[i++]);
+        if ([c1x, c1y, c2x, c2y, x, y].every(Number.isFinite)) {
+          const previous = anchors[anchors.length - 1];
+          if (previous) previous.cpOut = { x: c1x, y: c1y };
+          anchors.push({ x, y, cpIn: { x: c2x, y: c2y } });
+        }
+      }
+    }
+
+    return { anchors, closed };
+  };
+
+  const serializePathData = (anchors: PathAnchor[], closed: boolean) => {
+    if (anchors.length === 0) return '';
+    let result = `M ${anchors[0].x} ${anchors[0].y}`;
+    for (let i = 1; i < anchors.length; i++) {
+      const prev = anchors[i - 1];
+      const curr = anchors[i];
+      if (prev.cpOut || curr.cpIn) {
+        const c1 = prev.cpOut || { x: prev.x, y: prev.y };
+        const c2 = curr.cpIn || { x: curr.x, y: curr.y };
+        result += ` C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${curr.x} ${curr.y}`;
+      } else {
+        result += ` L ${curr.x} ${curr.y}`;
+      }
+    }
+    if (closed) result += ' Z';
+    return result;
+  };
 
   const zoomToFitSelected = () => {
     if (selectedIds.length === 0) return;
@@ -210,24 +328,26 @@ export const Canvas = () => {
     setViewport({ x: newX, y: newY, zoom: finalZoom });
   };
 
-  const handlePointDragMove = (nodeId: string, index: number, e: any) => {
+  const handlePointDragMove = (nodeId: string, index: number, _e: CanvasMouseEvent) => {
     const node = nodes.find(n => n.id === nodeId);
     if (node && node.type === 'path') {
         const { x, y } = getPointerPosition();
-        // This is a bit complex because we need to parse the path data
-        // For now, let's assume simple L points
-        const points = (node as any).data.replace(/[MLZ]/g, '').trim().split(/\s+/).map(Number);
-        const newPoints = [...points];
-        newPoints[index * 2] = x - node.x;
-        newPoints[index * 2 + 1] = y - node.y;
-        
-        let newData = '';
-        for (let i = 0; i < newPoints.length; i += 2) {
-            newData += (i === 0 ? 'M ' : 'L ') + `${newPoints[i]} ${newPoints[i+1]} `;
-        }
-        if ((node as any).data.includes('Z')) newData += 'Z';
-        
-        updateNode(nodeId, { data: newData });
+        const parsed = parsePathData(node.data);
+        const anchors = [...parsed.anchors];
+        const target = anchors[index];
+        if (!target) return;
+
+        const nextX = x - node.x;
+        const nextY = y - node.y;
+        const dx = nextX - target.x;
+        const dy = nextY - target.y;
+
+        target.x = nextX;
+        target.y = nextY;
+        if (target.cpIn) target.cpIn = { x: target.cpIn.x + dx, y: target.cpIn.y + dy };
+        if (target.cpOut) target.cpOut = { x: target.cpOut.x + dx, y: target.cpOut.y + dy };
+
+        updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
     }
   };
 
@@ -269,7 +389,7 @@ export const Canvas = () => {
 
   const findInnermostFrame = (x: number, y: number, excludeIds: string[] = []): string | undefined => {
     const frames = nodes.filter(n => {
-      if (n.type !== 'frame' || excludeIds.includes(n.id)) return false;
+      if ((n.type !== 'frame' && n.type !== 'section') || excludeIds.includes(n.id)) return false;
       const globalPos = getGlobalPosition(n.id);
       return x >= globalPos.x && x <= globalPos.x + n.width &&
              y >= globalPos.y && y <= globalPos.y + n.height;
@@ -307,7 +427,7 @@ export const Canvas = () => {
     }
     if (closed) data += ' Z';
 
-    const node = createDefaultNode('path', minX, minY) as any;
+    const node = createDefaultNode('path', minX, minY) as PathNode;
     node.data = data;
     node.width = Math.max(1, maxX - minX);
     node.height = Math.max(1, maxY - minY);
@@ -318,7 +438,13 @@ export const Canvas = () => {
     pushHistory();
   };
 
-  const handleMouseDown = (e: any) => {
+  const handleMouseDown = (e: CanvasMouseEvent) => {
+    setContextMenu(null);
+
+    if (e.evt.button === 2) {
+      return;
+    }
+
     // Middle Mouse Button (button 1) for panning
     if (e.evt.button === 1 || tool === 'hand') {
       setIsPanning(true);
@@ -337,7 +463,8 @@ export const Canvas = () => {
     }
 
     const clickedOnStage = e.target === e.target.getStage();
-    const isDrawingTool = ['rect', 'circle', 'ellipse', 'text', 'frame', 'image'].includes(tool);
+    const drawingTools: DrawingTool[] = ['rect', 'circle', 'ellipse', 'text', 'frame', 'section', 'image'];
+    const isDrawingTool = drawingTools.includes(tool as DrawingTool);
 
     // If text tool and clicked on existing text, edit it instead of creating new
     if (tool === 'text' && !clickedOnStage) {
@@ -361,13 +488,16 @@ export const Canvas = () => {
             finalY -= parentPos.y;
         }
 
-        const node = createDefaultNode(tool as any, finalX, finalY);
+        const node = createDefaultNode(tool as DrawingTool, finalX, finalY);
         node.parentId = parentId;
         node.width = 0;
         node.height = 0;
         setNewNode(node);
         setIsDrawing(true);
         setSelectedIds([]);
+        
+        // Also start selection marquee in case they drag
+        setSelectionRect({ x, y, width: 0, height: 0 });
       } else if (tool === 'pen') {
         const { x, y } = getPointerPosition();
         
@@ -385,19 +515,22 @@ export const Canvas = () => {
         setPenPoints([...penPoints, { x, y, cp1: {x, y}, cp2: {x, y} }]);
       } else if (tool === 'select') {
         const id = e.target.id();
-        const clickedFrame = nodes.find(n => n.id === id && n.type === 'frame');
+        const clickedFrame = nodes.find(n => n.id === id && (n.type === 'frame' || n.type === 'section'));
         
-        if (clickedOnStage || clickedFrame) {
+        if (clickedOnStage) {
             const { x, y } = getPointerPosition();
             setSelectionRect({ x, y, width: 0, height: 0 });
             setSelectedIds([]);
+        } else if (clickedFrame) {
+            if (e.evt.shiftKey) setSelectedIds(Array.from(new Set([...selectedIds, clickedFrame.id])));
+            else setSelectedIds([clickedFrame.id]);
         }
       }
       return;
     }
   };
 
-  const handleMouseMove = (e: any) => {
+  const handleMouseMove = (e: CanvasMouseEvent) => {
     const stage = stageRef.current;
     if (!stage) return;
 
@@ -427,6 +560,7 @@ export const Canvas = () => {
 
     if (isDrawing && newNode) {
       const stage = e.target.getStage();
+      if (!stage) return;
       const pointer = stage.getPointerPosition();
       if (!pointer) return;
 
@@ -443,11 +577,11 @@ export const Canvas = () => {
           localY -= parentPos.y;
       }
 
-      if (newNode.type === 'ellipse') {
+        if (newNode.type === 'ellipse') {
           setNewNode({
-              ...newNode,
-              width: Math.abs(localX - newNode.x) * 2,
-              height: Math.abs(localY - newNode.y) * 2
+            ...newNode,
+            width: localX - newNode.x,
+            height: localY - newNode.y
           });
       } else if (newNode.type === 'text') {
           const w = localX - newNode.x;
@@ -502,13 +636,13 @@ export const Canvas = () => {
             } else {
               finalNode.width = 100; // Default min width for click
               finalNode.height = finalNode.type === 'image' ? 100 : 24;
-              if (finalNode.type === 'text') (finalNode as any).fontSize = 20; // Default for point text click
+              if (finalNode.type === 'text') finalNode.fontSize = 20; // Default for point text click
               finalNode.horizontalResizing = 'hug';
               finalNode.verticalResizing = 'hug';
             }
             if (finalNode.type === 'image') {
-              (finalNode as any).src = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60';
-              (finalNode as any).imageScaleMode = 'fill';
+              finalNode.src = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60';
+              finalNode.imageScaleMode = 'fill';
             }
         } else {
             finalNode.width = Math.max(finalNode.width, 20);
@@ -520,6 +654,7 @@ export const Canvas = () => {
       }
       setIsDrawing(false);
       setNewNode(null);
+      setSelectionRect(null);
     } else if (selectionRect) {
       // Perform marquee selection
       const box = {
@@ -549,6 +684,74 @@ export const Canvas = () => {
 
       setSelectedIds(hits);
       setSelectionRect(null);
+    }
+  };
+
+  const handleCanvasContextMenu = (e: Konva.KonvaEventObject<PointerEvent>) => {
+    e.evt.preventDefault();
+    const pointer = getPointerPosition();
+    const targetId = e.target?.id?.();
+
+    const isTargetSelected = targetId && selectedIds.includes(targetId);
+    const hasMultiSelection = selectedIds.length > 1;
+
+    if (targetId && nodes.some((node) => node.id === targetId) && !isTargetSelected && !hasMultiSelection) {
+      setSelectedIds([targetId]);
+    }
+
+    setContextMenu({
+      x: e.evt.clientX,
+      y: e.evt.clientY,
+      canvasX: pointer.x,
+      canvasY: pointer.y,
+    });
+  };
+
+  const runContextAction = (action: 'copy' | 'paste' | 'duplicate' | 'group' | 'frame' | 'delete') => {
+    if (action === 'copy') {
+      copySelected();
+      setContextMenu(null);
+      return;
+    }
+
+    if (action === 'paste') {
+      if (!contextMenu) return;
+      pasteCopied(contextMenu.canvasX, contextMenu.canvasY);
+      pushHistory();
+      setContextMenu(null);
+      return;
+    }
+
+    if (action === 'duplicate') {
+      if (!contextMenu) return;
+      copySelected();
+      pasteCopied(contextMenu.canvasX + 24, contextMenu.canvasY + 24);
+      pushHistory();
+      setContextMenu(null);
+      return;
+    }
+
+    if (action === 'group') {
+      if (selectedIds.length < 2) return;
+      groupSelected();
+      pushHistory();
+      setContextMenu(null);
+      return;
+    }
+
+    if (action === 'frame') {
+      if (selectedIds.length === 0) return;
+      frameSelected();
+      pushHistory();
+      setContextMenu(null);
+      return;
+    }
+
+    if (action === 'delete') {
+      if (selectedIds.length === 0) return;
+      deleteNodes(selectedIds);
+      pushHistory();
+      setContextMenu(null);
     }
   };
 
@@ -589,7 +792,7 @@ export const Canvas = () => {
     }
   };
 
-  const handleWheel = (e: any) => {
+  const handleWheel = (e: CanvasWheelEvent) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
     if (!stage) return;
@@ -614,66 +817,81 @@ export const Canvas = () => {
     });
   };
 
-  const handleNodeDragStart = (e: any) => {
+  const handleNodeDragStart = (e: CanvasMouseEvent) => {
     const id = e.target.id();
     if (!selectedIds.includes(id)) {
       setSelectedIds([id]);
     }
   };
 
-  // Smart Snapping
-  const [guides, setGuides] = useState<{ x?: number, y?: number }[]>([]);
-
-  const handleNodeDragMove = (e: any) => {
+  const handleNodeDragMove = (e: CanvasMouseEvent) => {
     const node = e.target;
     const stage = stageRef.current;
     if (!stage) return;
 
+    const nodeId = node.id();
+    const draggedModel = nodes.find(n => n.id === nodeId);
+    if (!draggedModel) return;
+    const isCenterAnchored = draggedModel.type === 'circle' || draggedModel.type === 'ellipse';
+    const currentWidth = clampSize(Math.abs(node.width() || draggedModel.width), Math.abs(draggedModel.width));
+    const currentHeight = clampSize(Math.abs(node.height() || draggedModel.height), Math.abs(draggedModel.height));
+    const anchorOffsetX = isCenterAnchored ? currentWidth / 2 : 0;
+    const anchorOffsetY = isCenterAnchored ? currentHeight / 2 : 0;
+
+    const parentGlobal = draggedModel.parentId ? getGlobalPosition(draggedModel.parentId) : { x: 0, y: 0 };
+
     const snapThreshold = 5 / viewport.zoom;
     const newGuides: { x?: number, y?: number }[] = [];
     
-    let currentX = node.x();
-    let currentY = node.y();
+    let currentGlobalX = clampCoord(parentGlobal.x + node.x() - anchorOffsetX, draggedModel.x);
+    let currentGlobalY = clampCoord(parentGlobal.y + node.y() - anchorOffsetY, draggedModel.y);
 
     nodes.forEach(otherNode => {
-      if (otherNode.id === node.id()) return;
+      if (otherNode.id === nodeId) return;
+      const otherPos = getGlobalPosition(otherNode.id);
 
       // Snap X
-      if (Math.abs(currentX - otherNode.x) < snapThreshold) {
-        currentX = otherNode.x;
-        newGuides.push({ x: otherNode.x });
+      if (Math.abs(currentGlobalX - otherPos.x) < snapThreshold) {
+        currentGlobalX = otherPos.x;
+        newGuides.push({ x: otherPos.x });
       }
-      if (Math.abs(currentX + node.width() - (otherNode.x + otherNode.width)) < snapThreshold) {
-        currentX = otherNode.x + otherNode.width - node.width();
-        newGuides.push({ x: otherNode.x + otherNode.width });
+      if (Math.abs(currentGlobalX + currentWidth - (otherPos.x + otherNode.width)) < snapThreshold) {
+        currentGlobalX = otherPos.x + otherNode.width - currentWidth;
+        newGuides.push({ x: otherPos.x + otherNode.width });
       }
 
       // Snap Y
-      if (Math.abs(currentY - otherNode.y) < snapThreshold) {
-        currentY = otherNode.y;
-        newGuides.push({ y: otherNode.y });
+      if (Math.abs(currentGlobalY - otherPos.y) < snapThreshold) {
+        currentGlobalY = otherPos.y;
+        newGuides.push({ y: otherPos.y });
       }
-      if (Math.abs(currentY + node.height() - (otherNode.y + otherNode.height)) < snapThreshold) {
-        currentY = otherNode.y + otherNode.height - node.height();
-        newGuides.push({ y: otherNode.y + otherNode.height });
+      if (Math.abs(currentGlobalY + currentHeight - (otherPos.y + otherNode.height)) < snapThreshold) {
+        currentGlobalY = otherPos.y + otherNode.height - currentHeight;
+        newGuides.push({ y: otherPos.y + otherNode.height });
       }
     });
 
-    node.x(currentX);
-    node.y(currentY);
-    setGuides(newGuides);
+    node.x(clampCoord(currentGlobalX - parentGlobal.x + anchorOffsetX, node.x()));
+    node.y(clampCoord(currentGlobalY - parentGlobal.y + anchorOffsetY, node.y()));
+    setSnapLines(newGuides);
   };
 
-  const handleNodeUpdate = (e: any) => {
+  const handleNodeUpdate = (e: CanvasMouseEvent) => {
     const konvaNode = e.target;
     const nodeId = konvaNode.id();
     const nodeData = nodes.find(n => n.id === nodeId);
     if (!nodeData) return;
 
+    const newWidth = clampSize(Math.abs(konvaNode.width() * konvaNode.scaleX()), Math.abs(nodeData.width));
+    const newHeight = clampSize(Math.abs(konvaNode.height() * konvaNode.scaleY()), Math.abs(nodeData.height));
+    const isCenterAnchored = nodeData.type === 'circle' || nodeData.type === 'ellipse';
+    const anchorOffsetX = isCenterAnchored ? newWidth / 2 : 0;
+    const anchorOffsetY = isCenterAnchored ? newHeight / 2 : 0;
+
     // Get stage-relative position and convert to canvas-global
     const absolutePos = konvaNode.getAbsolutePosition();
-    const globalX = (absolutePos.x - viewport.x) / viewport.zoom;
-    const globalY = (absolutePos.y - viewport.y) / viewport.zoom;
+    const globalX = clampCoord((absolutePos.x - viewport.x) / viewport.zoom - anchorOffsetX, nodeData.x);
+    const globalY = clampCoord((absolutePos.y - viewport.y) / viewport.zoom - anchorOffsetY, nodeData.y);
 
     // We want to reparent based on where the node is dropped
     // Exclude self and children to avoid circular dependency
@@ -695,17 +913,15 @@ export const Canvas = () => {
 
     if (newParentId) {
         const parentPos = getGlobalPosition(newParentId);
-        finalX -= parentPos.x;
-        finalY -= parentPos.y;
+        finalX = clampCoord(finalX - parentPos.x, finalX);
+        finalY = clampCoord(finalY - parentPos.y, finalY);
     }
 
-    const newWidth = konvaNode.width() * konvaNode.scaleX();
-    const newHeight = konvaNode.height() * konvaNode.scaleY();
     const wasResized = Math.abs(newWidth - nodeData.width) > 0.1 || Math.abs(newHeight - nodeData.height) > 0.1;
 
     updateNode(nodeId, {
-      x: finalX,
-      y: finalY,
+      x: clampCoord(finalX, nodeData.x),
+      y: clampCoord(finalY, nodeData.y),
       parentId: newParentId,
       width: newWidth,
       height: newHeight,
@@ -717,13 +933,13 @@ export const Canvas = () => {
           verticalResizing: 'fixed' 
       } : {})
     });
-    setGuides([]);
+    setSnapLines([]);
     pushHistory();
   };
 
   const renderSingleNode = (node: SceneNode) => {
     const isSelected = selectedIds.includes(node.id);
-    const getPaintProps = (paints: any[] | undefined, fallback: string) => {
+    const getPaintProps = (paints: Paint[] | undefined, fallback: string) => {
       if (!paints || paints.length === 0) return { fill: fallback };
       const visible = paints.filter(p => p.visible !== false);
       if (visible.length === 0) return { fill: 'transparent' };
@@ -732,8 +948,8 @@ export const Canvas = () => {
       if (paint.type === 'solid') {
         return { fill: paint.color, opacity: (node.opacity || 1) * (paint.opacity || 1) };
       } else if (paint.type === 'gradient-linear') {
-        const stops: any[] = [];
-        (paint.gradientStops || []).forEach((s: any) => {
+        const stops: (number | string)[] = [];
+        (paint.gradientStops || []).forEach((s) => {
           stops.push(s.offset, s.color);
         });
         return {
@@ -746,17 +962,22 @@ export const Canvas = () => {
       return { fill: paint.color || fallback };
     };
 
-    const fillProps = getPaintProps(node.fills, node.fill);
-    const strokeProps = getPaintProps(node.strokes, node.stroke);
-    const cornerRadiusArray = node.individualCornerRadius ? [
-        node.individualCornerRadius.topLeft,
-        node.individualCornerRadius.topRight,
-        node.individualCornerRadius.bottomRight,
-        node.individualCornerRadius.bottomLeft
-    ] : node.cornerRadius;
+    let fillProps = getPaintProps(node.fills, node.fill);
+    let strokeProps = getPaintProps(node.strokes, node.stroke);
+
+    // Keep mask visuals readable and non-destructive on canvas.
+    if (node.isMask) {
+      fillProps = { fill: 'rgba(59, 130, 246, 0.18)', opacity: 1 };
+      strokeProps = { fill: '#60A5FA', opacity: 1 };
+    }
+    const cornerData = getSanitizedCornerData(node);
+    const cornerRadiusArray = cornerData.cornerRadiusArray;
+    const smoothCornerRadius = cornerData.uniform;
+    const smoothCornerSmoothing = cornerData.smoothing;
 
     // Effects
-    const dropShadow = (node.effects || []).find((e: any) => e.visible !== false && e.type === 'drop-shadow');
+    const effects: Effect[] = node.effects || [];
+    const dropShadow = effects.find((effect) => effect.visible !== false && effect.type === 'drop-shadow');
     const shadowProps = dropShadow ? {
         shadowColor: dropShadow.color,
         shadowBlur: dropShadow.radius,
@@ -764,11 +985,19 @@ export const Canvas = () => {
         shadowOpacity: 1,
     } : {};
 
-    const layerBlur = (node.effects || []).find((e: any) => e.visible !== false && e.type === 'layer-blur');
+    const layerBlur = effects.find((effect) => effect.visible !== false && effect.type === 'layer-blur');
     const blurProps = layerBlur ? {
         filters: [Konva.Filters.Blur],
         blurRadius: layerBlur.radius,
     } : {};
+
+    const blendModeMap: Record<string, GlobalCompositeOperation> = {
+      'pass-through': 'source-over',
+      normal: 'source-over',
+      multiply: 'multiply',
+      screen: 'screen',
+      overlay: 'overlay',
+    };
 
     const { key: _key, ...konvaProps } = {
       id: node.id,
@@ -779,8 +1008,10 @@ export const Canvas = () => {
       height: node.height,
       rotation: node.rotation,
       opacity: node.opacity,
+      globalCompositeOperation: blendModeMap[node.blendMode || 'normal'] || 'source-over',
       draggable: node.draggable && !node.locked && tool === 'select' && !isPanning,
       listening: node.visible,
+      dash: node.isMask ? [8 / viewport.zoom, 4 / viewport.zoom] : undefined,
       ...fillProps,
       stroke: strokeProps.fill,
       strokeWidth: node.strokeWidth,
@@ -791,22 +1022,39 @@ export const Canvas = () => {
       onDragStart: handleNodeDragStart,
       onDragEnd: handleNodeUpdate,
       onTransformEnd: handleNodeUpdate,
-      onTransform: (e: any) => {
+        onTransform: (e: CanvasMouseEvent) => {
           const nodeTarget = e.target;
           const scaleX = nodeTarget.scaleX();
           const scaleY = nodeTarget.scaleY();
+          
+          const isShift = e.evt.shiftKey;
+          const isAlt = e.evt.altKey;
+
+          const newWidth = clampSize(nodeTarget.width() * scaleX, node.width);
+          const newHeight = clampSize(nodeTarget.height() * scaleY, node.height);
+
+          // Constraints: if text node with hug, we might want to restrict height
+          // but Konva Transformer generally changes width/height directly here.
+          
           nodeTarget.setAttrs({
-            width: Math.max(5, nodeTarget.width() * scaleX),
-            height: Math.max(5, nodeTarget.height() * scaleY),
+            width: newWidth,
+            height: newHeight,
             scaleX: 1,
             scaleY: 1
           });
+
+          if (isAlt) {
+              // Center scaling is natively handled by Transformer if centeredScaling=true,
+              // but we can manually adjust if needed or just rely on Konva.
+              // For now we improve the min-size behavior.
+          }
       },
-      onClick: (e: any) => {
+      onClick: (e: CanvasMouseEvent) => {
         if (node.locked) return;
+        if (typeof e.evt.button === 'number' && e.evt.button !== 0) return;
         e.cancelBubble = true;
         if (e.evt.shiftKey) {
-          setSelectedIds([...selectedIds, node.id]);
+          setSelectedIds(Array.from(new Set([...selectedIds, node.id])));
         } else {
           setSelectedIds([node.id]);
         }
@@ -834,8 +1082,8 @@ export const Canvas = () => {
         opacity: 0.5
     } : null;
 
-    if (node.type === 'frame') {
-        const hasSmoothing = node.cornerSmoothing > 0;
+    if (node.type === 'frame' || node.type === 'section' || node.type === 'group' || node.type === 'component' || node.type === 'instance') {
+        const hasSmoothing = smoothCornerSmoothing > 0;
         const isTopLevel = !node.parentId;
         
         return (
@@ -855,7 +1103,7 @@ export const Canvas = () => {
                     {...konvaProps} 
                     name="frame"
                     clipFunc={node.clipsContent ? (ctx) => {
-                        const r = node.individualCornerRadius || { topLeft: node.cornerRadius || 0, topRight: node.cornerRadius || 0, bottomRight: node.cornerRadius || 0, bottomLeft: node.cornerRadius || 0 };
+                      const r = cornerData.corners;
                         const w = node.width;
                         const h = node.height;
                         ctx.beginPath();
@@ -873,7 +1121,7 @@ export const Canvas = () => {
                 >
                     {hasSmoothing ? (
                         <Path 
-                            data={getSuperellipsePath(node.width, node.height, node.cornerRadius, node.cornerSmoothing)}
+                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
                             {...fillProps}
                             stroke={strokeProps.fill}
                             strokeWidth={node.strokeWidth}
@@ -905,7 +1153,7 @@ export const Canvas = () => {
                             {...hoverProps}
                         />
                     )}
-                    {isHovered && node.type === 'frame' && node.layoutMode !== 'none' && (
+                    {isHovered && (node.type === 'frame' || node.type === 'section' || node.type === 'group' || node.type === 'component' || node.type === 'instance') && node.layoutMode !== 'none' && (
                         <Group listening={false}>
                             {node.padding.top > 0 && <Rect x={0} y={0} width={node.width} height={node.padding.top} fill="rgba(255, 0, 255, 0.15)" />}
                             {node.padding.bottom > 0 && <Rect x={0} y={node.height - node.padding.bottom} width={node.width} height={node.padding.bottom} fill="rgba(255, 0, 255, 0.15)" />}
@@ -927,13 +1175,13 @@ export const Canvas = () => {
     }
 
     if (node.type === 'rect') {
-        const hasSmoothing = node.cornerSmoothing > 0;
+      const hasSmoothing = smoothCornerSmoothing > 0;
         return (
             <Group key={node.id}>
                 {hasSmoothing ? (
                     <Path 
                         {...konvaProps} 
-                        data={getSuperellipsePath(node.width, node.height, node.cornerRadius, node.cornerSmoothing)} 
+              data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)} 
                         lineJoin="round"
                     />
                 ) : (
@@ -967,24 +1215,30 @@ export const Canvas = () => {
                 konvaProps={konvaProps}
                 selectionProps={selectionProps}
                 hoverProps={hoverProps}
-                viewport={viewport}
             />
         );
     }
 
     if (node.type === 'circle') {
+        const radius = Math.abs(node.width / 2);
+        const circleProps = {
+            ...konvaProps,
+            x: node.x + radius,
+            y: node.y + radius,
+            radius: radius
+        };
         return (
             <Group key={node.id}>
-                <Circle {...konvaProps} radius={Math.abs((node.width || 0) / 2)} lineJoin="round" />
+                <Circle {...circleProps} lineJoin="round" />
                 {selectionProps && (
                     <Circle 
-                        x={node.x} y={node.y} radius={Math.abs(node.width / 2)}
+                        x={node.x + radius} y={node.y + radius} radius={radius}
                         {...selectionProps}
                     />
                 )}
                 {hoverProps && (
                     <Circle 
-                        x={node.x} y={node.y} radius={Math.abs(node.width / 2)}
+                        x={node.x + radius} y={node.y + radius} radius={radius}
                         {...hoverProps}
                     />
                 )}
@@ -992,18 +1246,27 @@ export const Canvas = () => {
         );
     }
     if (node.type === 'ellipse') {
+        const radiusX = Math.abs(node.width / 2);
+        const radiusY = Math.abs(node.height / 2);
+        const ellipseProps = {
+            ...konvaProps,
+            x: node.x + radiusX,
+            y: node.y + radiusY,
+            radiusX: radiusX,
+            radiusY: radiusY
+        };
         return (
             <Group key={node.id}>
-                <Ellipse {...konvaProps} radiusX={Math.abs((node.width || 0) / 2)} radiusY={Math.abs((node.height || 0) / 2)} lineJoin="round" />
+                <Ellipse {...ellipseProps} lineJoin="round" />
                 {selectionProps && (
                     <Ellipse 
-                        x={node.x} y={node.y} radiusX={Math.abs(node.width / 2)} radiusY={Math.abs(node.height / 2)}
+                        x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
                         {...selectionProps}
                     />
                 )}
                 {hoverProps && (
                     <Ellipse 
-                        x={node.x} y={node.y} radiusX={Math.abs(node.width / 2)} radiusY={Math.abs(node.height / 2)}
+                        x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
                         {...hoverProps}
                     />
                 )}
@@ -1013,20 +1276,20 @@ export const Canvas = () => {
     if (node.type === 'path') {
         const pathComp = (
             <Group key={node.id}>
-                <Path {...konvaProps} data={(node as any).data} lineJoin="round" />
-                {hoverProps && <Path data={(node as any).data} rotation={node.rotation} {...hoverProps} x={node.x} y={node.y} />}
+                <Path {...konvaProps} data={node.data} lineJoin="round" />
+                {hoverProps && <Path data={node.data} rotation={node.rotation} {...hoverProps} x={node.x} y={node.y} />}
             </Group>
         );
         if (tool === 'direct-select' && isSelected) {
-            const points = (node as any).data.replace(/[MLZ]/g, '').trim().split(/\s+/).map(Number);
+          const parsed = parsePathData(node.data);
             const handles = [];
-            for (let i = 0; i < points.length; i += 2) {
-                const idx = i / 2;
+          for (let idx = 0; idx < parsed.anchors.length; idx++) {
+            const anchor = parsed.anchors[idx];
                 handles.push(
                     <Circle
                         key={`${node.id}-point-${idx}`}
-                        x={node.x + points[i]}
-                        y={node.y + points[i+1]}
+                x={node.x + anchor.x}
+                y={node.y + anchor.y}
                         radius={4 / viewport.zoom}
                         fill="#FFFFFF"
                         stroke="#6366F1"
@@ -1042,24 +1305,27 @@ export const Canvas = () => {
         return pathComp;
     }
     if (node.type === 'text') {
+      const lineHeight = node.lineHeight ? node.lineHeight / node.fontSize : 1.2;
+      const isVerticalWriting = node.writingMode === 'vertical-rl' || node.writingMode === 'vertical-lr';
+      const resolvedRotation = node.rotation || (isVerticalWriting ? 90 : 0);
       return (
         <Group key={node.id}>
             <Text
             {...konvaProps}
-            text={(node as any).text}
-            fontSize={(node as any).fontSize}
-            fontFamily={(node as any).fontFamily}
-            align={(node as any).align}
+            text={node.text}
+            fontSize={node.fontSize}
+            fontFamily={node.fontFamily}
+            align={node.align}
             verticalAlign="top"
             width={node.width}
             height={node.height}
             visible={editingId !== node.id}
-            lineHeight={(node as any).lineHeight ? (node as any).lineHeight / (node as any).fontSize : 1.2}
+            lineHeight={lineHeight}
             wrap="word"
             padding={1}
             lineJoin="round"
-            opacity={(node as any).writingMode?.includes('vertical') ? 0.9 : node.opacity}
-            rotation={node.rotation || ((node as any).writingMode === 'vertical-rl' ? 90 : (node as any).writingMode === 'vertical-lr' ? 90 : 0)}
+            opacity={isVerticalWriting ? 0.9 : node.opacity}
+            rotation={resolvedRotation}
             />
             {selectionProps && (
                 <Rect 
@@ -1107,8 +1373,8 @@ export const Canvas = () => {
                             ctx.rotate((mask.rotation || 0) * Math.PI / 180);
                             ctx.translate(-mask.width / 2, -mask.height / 2);
 
-                            if (mask.type === 'rect' || mask.type === 'frame' || mask.type === 'image') {
-                                const r = mask.individualCornerRadius || { topLeft: mask.cornerRadius || 0, topRight: mask.cornerRadius || 0, bottomRight: mask.cornerRadius || 0, bottomLeft: mask.cornerRadius || 0 };
+                            if (mask.type === 'rect' || mask.type === 'frame' || mask.type === 'section' || mask.type === 'image') {
+                              const r = getSanitizedCornerData(mask).corners;
                                 const w = mask.width;
                                 const h = mask.height;
                                 
@@ -1129,8 +1395,24 @@ export const Canvas = () => {
                             } else if (mask.type === 'text') {
                                 ctx.rect(0, 0, mask.width, mask.height);
                             } else if (mask.type === 'path') {
-                                const p = new Path2D((mask as any).data);
-                                (ctx as any).addPath(p);
+                              const parsed = parsePathData(mask.data || '');
+                              if (parsed.anchors.length > 0) {
+                                ctx.moveTo(parsed.anchors[0].x, parsed.anchors[0].y);
+                                for (let i = 1; i < parsed.anchors.length; i++) {
+                                  const prev = parsed.anchors[i - 1];
+                                  const curr = parsed.anchors[i];
+                                  if (prev.cpOut || curr.cpIn) {
+                                    const c1 = prev.cpOut || { x: prev.x, y: prev.y };
+                                    const c2 = curr.cpIn || { x: curr.x, y: curr.y };
+                                    ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, curr.x, curr.y);
+                                  } else {
+                                    ctx.lineTo(curr.x, curr.y);
+                                  }
+                                }
+                                if (parsed.closed) ctx.closePath();
+                              } else {
+                                ctx.rect(0, 0, Math.max(1, mask.width), Math.max(1, mask.height));
+                              }
                             }
                             ctx.restore();
                         }}
@@ -1160,7 +1442,11 @@ export const Canvas = () => {
   };
 
   return (
-    <div id="canvas-container" className={`flex-1 bg-[#1A1A1A] relative overflow-hidden h-full ${tool === 'hand' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}>
+    <div
+      id="canvas-container"
+      className={`flex-1 bg-[#1A1A1A] relative overflow-hidden h-full ${tool === 'hand' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+      onClick={() => setContextMenu(null)}
+    >
        {/* Rulers */}
        <FigmaRulers />
 
@@ -1190,6 +1476,7 @@ export const Canvas = () => {
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
+          onContextMenu={handleCanvasContextMenu}
           onDblClick={(e) => tool === 'pen' && finalizePenPath()}
           draggable={false}
         >
@@ -1202,17 +1489,36 @@ export const Canvas = () => {
                 x={newNode.parentId ? getGlobalPosition(newNode.parentId).x : 0} 
                 y={newNode.parentId ? getGlobalPosition(newNode.parentId).y : 0}
               >
-                {(newNode.type === 'rect' || newNode.type === 'frame') && (
+                {(newNode.type === 'rect' || newNode.type === 'frame' || newNode.type === 'section') && (
                   <Rect x={newNode.x} y={newNode.y} width={newNode.width} height={newNode.height} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
                 )}
                 {newNode.type === 'circle' && (
-                  <Circle x={newNode.x} y={newNode.y} radius={Math.abs(newNode.width / 2)} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
+                  <Circle
+                    x={newNode.x + newNode.width / 2}
+                    y={newNode.y + newNode.width / 2}
+                    radius={Math.abs(newNode.width / 2)}
+                    fill="#6366F1"
+                    opacity={0.2}
+                    stroke="#6366F1"
+                    strokeWidth={1}
+                    lineJoin="round"
+                  />
                 )}
                 {newNode.type === 'image' && (
                   <Rect x={newNode.x} y={newNode.y} width={newNode.width} height={newNode.height} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
                 )}
                 {newNode.type === 'ellipse' && (
-                  <Ellipse x={newNode.y} y={newNode.y} radiusX={Math.abs(newNode.width / 2)} radiusY={Math.abs(newNode.height / 2)} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
+                  <Ellipse
+                    x={newNode.x + newNode.width / 2}
+                    y={newNode.y + newNode.height / 2}
+                    radiusX={Math.abs(newNode.width / 2)}
+                    radiusY={Math.abs(newNode.height / 2)}
+                    fill="#6366F1"
+                    opacity={0.2}
+                    stroke="#6366F1"
+                    strokeWidth={1}
+                    lineJoin="round"
+                  />
                 )}
                 {newNode.type === 'text' && (
                   <Group>
@@ -1228,9 +1534,9 @@ export const Canvas = () => {
                       <Text 
                           x={newNode.width < 0 ? newNode.x + newNode.width : newNode.x} 
                           y={newNode.height < 0 ? newNode.y + newNode.height : newNode.y}
-                          text={(newNode as any).text}
-                          fontSize={(newNode as any).fontSize}
-                          fontFamily={(newNode as any).fontFamily}
+                          text={newNode.text}
+                          fontSize={newNode.fontSize}
+                          fontFamily={newNode.fontFamily}
                           fill="#6366F1"
                           opacity={0.5}
                           width={Math.abs(newNode.width)}
@@ -1313,16 +1619,31 @@ export const Canvas = () => {
             {tool === 'select' && (
               <Transformer
                 ref={transformerRef}
+                keepRatio={false}
+                centeredScaling={true} // Enables Alt (Option) center scaling automatically
+                shiftBehavior="inverted"
                 boundBoxFunc={(oldBox, newBox) => {
-                  if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) return oldBox;
+                  if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) return oldBox;
                   return newBox;
                 }}
                 anchorStroke="#6366F1" anchorFill="#FFFFFF" anchorSize={6} borderStroke="#6366F1" borderDash={[1, 1]}
               />
             )}
 
+            {/* Persistent Guides */}
+            {persistentGuides.map((g) => (
+              <Line
+                  key={`persistent-guide-${g.id}`}
+                  points={g.type === 'vertical'
+                      ? [g.position, -10000, g.position, 10000]
+                      : [-10000, g.position, 10000, g.position]}
+                  stroke="#3B82F6"
+                  strokeWidth={1 / viewport.zoom}
+              />
+            ))}
+
             {/* Smart Guides */}
-            {guides.map((g, i) => (
+            {snapLines.map((g, i) => (
               <Line
                   key={`guide-${i}`}
                   points={g.x !== undefined 
@@ -1392,10 +1713,70 @@ export const Canvas = () => {
         </Stage>
       </div>
 
+      {contextMenu && (
+        <div
+          className="fixed z-[120] w-48 rounded-xl border border-[#2A2A2A] bg-[#0B0B0B] p-1 shadow-2xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => runContextAction('copy')}
+            disabled={selectedIds.length === 0}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-[#C4C4C4] transition-colors hover:bg-[#1F1F1F] hover:text-white disabled:opacity-35"
+          >
+            Copy Selection
+          </button>
+          <button
+            onClick={() => runContextAction('paste')}
+            disabled={!canPaste()}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-[#C4C4C4] transition-colors hover:bg-[#1F1F1F] hover:text-white disabled:opacity-35"
+          >
+            Paste Here
+          </button>
+          <button
+            onClick={() => runContextAction('duplicate')}
+            disabled={selectedIds.length === 0}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-[#C4C4C4] transition-colors hover:bg-[#1F1F1F] hover:text-white disabled:opacity-35"
+          >
+            Duplicate
+          </button>
+
+          <div className="my-1 h-px bg-[#262626]" />
+
+          <button
+            onClick={() => runContextAction('group')}
+            disabled={selectedIds.length < 2}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-[#C4C4C4] transition-colors hover:bg-[#1F1F1F] hover:text-white disabled:opacity-35"
+          >
+            Group Selection
+          </button>
+          <button
+            onClick={() => runContextAction('frame')}
+            disabled={selectedIds.length === 0}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-[#C4C4C4] transition-colors hover:bg-[#1F1F1F] hover:text-white disabled:opacity-35"
+          >
+            Frame Selection
+          </button>
+
+          <div className="my-1 h-px bg-[#262626]" />
+
+          <button
+            onClick={() => runContextAction('delete')}
+            disabled={selectedIds.length === 0}
+            className="flex w-full items-center rounded-lg px-2.5 py-2 text-xs text-red-300 transition-colors hover:bg-red-600/20 hover:text-red-200 disabled:opacity-35"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+
       {/* Text Editing Overlay */}
-      {editingId && nodes.find(n => n.id === editingId) && (() => {
-        const node = nodes.find(n => n.id === editingId) as any;
+      {editingId && nodes.find(n => n.id === editingId && n.type === 'text') && (() => {
+        const node = nodes.find((n): n is TextNode => n.id === editingId && n.type === 'text');
+        if (!node) return null;
         const globalPos = getGlobalPosition(node.id);
+        const visibleTextFill = (node.fills || []).filter((p) => p.visible !== false && p.type === 'solid').slice(-1)[0];
+        const textColor = visibleTextFill?.color || node.fill;
         return (
           <textarea
             autoFocus
@@ -1410,7 +1791,7 @@ export const Canvas = () => {
               height: (editingHeight || node.height || 40) * viewport.zoom,
               fontSize: node.fontSize * viewport.zoom,
               fontFamily: node.fontFamily,
-              color: node.fill,
+              color: textColor,
               textAlign: node.align || 'left',
               WebkitTextStroke: node.strokeWidth ? `${node.strokeWidth * viewport.zoom}px ${node.stroke}` : 'none',
               background: 'transparent',

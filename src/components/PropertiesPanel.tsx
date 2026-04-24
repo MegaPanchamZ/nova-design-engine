@@ -1,13 +1,14 @@
 import React, { useState, useCallback, useRef } from 'react';
+import type { LucideIcon } from 'lucide-react';
 import { Settings2, Type, Move, Palette, Combine, Scissors, BoxSelect, Layers, AlignVerticalSpaceAround, AlignHorizontalSpaceAround, ChevronDown, Database, Minus, MousePointer2, Square, Zap, AlignLeft, AlignCenter as AlignCenterHorizontal, AlignRight, AlignStartVertical as AlignTop, AlignCenterVertical, AlignEndVertical as AlignBottom, ArrowLeftRight, ArrowUpDown, RotateCw, Maximize2, Monitor, Plus, Eye, EyeOff, Trash2, GripVertical } from 'lucide-react';
 import { useStore } from '../store';
-import { SceneNode, createDefaultNode, FrameNode, Interaction } from '../types';
+import { Effect, FrameNode, Interaction, Paint, PathNode, SceneNode, TextNode, createDefaultNode } from '../types';
 import { performBooleanOperation } from '../lib/boolean';
 import { GOOGLE_FONTS, loadFont } from '../services/fontService';
 import { v4 as uuidv4 } from 'uuid';
 import { exportToCode } from '../lib/codeExport';
 
-const ScrubLabel = ({ label, value, onChange, onBlur, icon: Icon, step = 1, suffix = "" }: { label: string, value: number, onChange: (val: number) => void, onBlur?: () => void, icon?: any, step?: number, suffix?: string }) => {
+const ScrubLabel = ({ label, value, onChange, onBlur, icon: Icon, step = 1, suffix = "" }: { label: string, value: number, onChange: (val: number) => void, onBlur?: () => void, icon?: LucideIcon | React.ComponentType<{ size: number; strokeWidth?: number; className?: string }>; step?: number, suffix?: string }) => {
     const isDragging = useRef(false);
     const startX = useRef(0);
     const startValue = useRef(0);
@@ -61,7 +62,7 @@ const PropertyRow = ({ children, className = "" }: { children: React.ReactNode; 
     </div>
 );
 
-const InputField = ({ value, onChange, onBlur, disabled = false, prefix, suffix, className = "" }: { value: any; onChange: (val: any) => void; onBlur?: () => void; disabled?: boolean; prefix?: React.ReactNode; suffix?: React.ReactNode; className?: string }) => (
+const InputField = ({ value, onChange, onBlur, disabled = false, prefix, suffix, className = "" }: { value: string | number; onChange: (val: string) => void; onBlur?: () => void; disabled?: boolean; prefix?: React.ReactNode; suffix?: React.ReactNode; className?: string }) => (
     <div className={`flex-1 flex items-center bg-[#2C2C2C] border border-transparent focus-within:border-indigo-500/50 rounded-sm px-1.5 h-7 transition-all ${disabled ? 'opacity-40' : ''} ${className}`}>
         {prefix}
         <input 
@@ -76,14 +77,14 @@ const InputField = ({ value, onChange, onBlur, disabled = false, prefix, suffix,
     </div>
 );
 
-const CenterHorizontalIcon = ({ size, className, strokeWidth = 2 }: any) => (
+const CenterHorizontalIcon = ({ size, className, strokeWidth = 2 }: { size: number; className?: string; strokeWidth?: number }) => (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
         <path d="M7 1V13" stroke="currentColor" strokeWidth={strokeWidth} />
         <rect x="4" y="3.5" width="6" height="7" stroke="currentColor" strokeWidth={strokeWidth} />
     </svg>
 );
 
-const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: any) => (
+const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: { size: number; className?: string; strokeWidth?: number }) => (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
         <path d="M1 7H13" stroke="currentColor" strokeWidth={strokeWidth} />
         <rect x="3.5" y="4" width="7" height="6" stroke="currentColor" strokeWidth={strokeWidth} />
@@ -91,20 +92,24 @@ const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: any) => (
 );
 
 export const PropertiesPanel = () => {
-  const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode } = useStore();
+    const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected } = useStore();
   const [expandedPadding, setExpandedPadding] = useState(false);
   const [expandedRadius, setExpandedRadius] = useState(false);
+    const [exportScale, setExportScale] = useState('1x');
+    const [exportFormat, setExportFormat] = useState('TSX');
 
   const currentPage = pages.find(p => p.id === currentPageId);
   const nodes = currentPage?.nodes || [];
   const selectedNodes = nodes.filter((n) => selectedIds.includes(n.id));
   const selectedNode = selectedNodes[0];
+    const selectedFrameNode = selectedNode && ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type) ? (selectedNode as FrameNode) : null;
+    const selectedTextNode = selectedNode?.type === 'text' ? (selectedNode as TextNode) : null;
 
   const handleBoolean = (operation: 'union' | 'subtract' | 'intersect' | 'exclude') => {
     const pathData = performBooleanOperation(selectedNodes, operation);
     if (pathData) {
         // Create new path node
-        const newNode = createDefaultNode('path', 0, 0) as any;
+        const newNode = createDefaultNode('path', 0, 0) as PathNode;
         newNode.data = pathData;
         newNode.name = `${operation.charAt(0).toUpperCase() + operation.slice(1)} Result`;
         
@@ -116,9 +121,9 @@ export const PropertiesPanel = () => {
     }
   };
 
-  const handleChange = (key: string, value: any) => {
+    const handleChange = (key: string, value: unknown) => {
     selectedIds.forEach(id => {
-        updateNode(id, { [key]: value } as any);
+                updateNode(id, { [key]: value } as Partial<SceneNode>);
     });
   };
 
@@ -131,6 +136,9 @@ export const PropertiesPanel = () => {
   const handleBlur = () => {
     pushHistory();
   };
+
+    const clampNonNegative = (value: number) => Math.max(0, value);
+    const parseNonNegativeInt = (value: string) => clampNonNegative(parseInt(value) || 0);
 
   if (selectedNodes.length === 0) {
     return (
@@ -159,8 +167,7 @@ export const PropertiesPanel = () => {
     );
   }
 
-  const isFrame = selectedNode.type === 'frame';
-  const parentFrame = selectedNode.parentId ? nodes.find(n => n.id === selectedNode.parentId) : null;
+    const isFrame = ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type);
 
   return (
     <aside id="properties-panel" className="w-64 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
@@ -183,21 +190,45 @@ export const PropertiesPanel = () => {
         <div className="h-12 flex items-center justify-between px-4 border-b border-[#2A2A2A] bg-[#1E1E1E]">
             <div className="flex items-center gap-2">
                 <div className="w-5 h-5 rounded bg-indigo-500/20 flex items-center justify-center">
-                    {selectedNode.type === 'frame' ? <Square size={10} className="text-indigo-400" /> : <Layers size={10} className="text-indigo-400" />}
+                    {isFrame ? <Square size={10} className="text-indigo-400" /> : <Layers size={10} className="text-indigo-400" />}
                 </div>
                 <span className="text-[11px] font-bold text-[#EDEDED] truncate max-w-[100px]">{selectedNode.name}</span>
                 <ChevronDown size={10} className="text-[#888]" />
             </div>
             <div className="flex items-center gap-1">
                 <button 
-                    onClick={() => (useStore.getState() as any).selectMatching()}
+                    onClick={selectMatching}
                     title="Select Matching Layers"
                     className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
                 >
                     <BoxSelect size={14} strokeWidth={2} />
                 </button>
-                <button className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"><Scissors size={14} /></button>
-                <button className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"><Combine size={14} /></button>
+                <button 
+                    onClick={() => {
+                        if (selectedNodes.length > 1) handleBoolean('subtract');
+                        else {
+                            deleteNodes(selectedIds);
+                            pushHistory();
+                        }
+                    }}
+                    title={selectedNodes.length > 1 ? 'Boolean Subtract' : 'Delete Selection'}
+                    className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                >
+                    <Scissors size={14} />
+                </button>
+                <button 
+                    onClick={() => {
+                        if (selectedNodes.length > 1) handleBoolean('union');
+                        else {
+                            groupSelected();
+                            pushHistory();
+                        }
+                    }}
+                    title={selectedNodes.length > 1 ? 'Boolean Union' : 'Group Selection'}
+                    className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                >
+                    <Combine size={14} />
+                </button>
             </div>
         </div>
 
@@ -248,13 +279,22 @@ export const PropertiesPanel = () => {
                       <div key={it.id} className="bg-[#0A0A0A] p-3 rounded-lg border border-[#2A2A2A] space-y-3">
                         <div className="flex justify-between items-center">
                            <span className="text-[10px] text-indigo-400 font-bold uppercase">{it.trigger}</span>
-                           <button className="text-[10px] text-red-500/50 hover:text-red-500">Remove</button>
+                           <button 
+                            onClick={() => {
+                                const next = (selectedNode.interactions || []).filter(i => i.id !== it.id);
+                                handleChange('interactions', next);
+                                pushHistory();
+                            }}
+                            className="text-[10px] text-red-500/50 hover:text-red-500"
+                           >
+                            Remove
+                           </button>
                         </div>
                         {it.actions.map((action, aidx) => (
                           <div key={aidx} className="flex flex-col gap-1">
                              <span className="text-[8px] text-[#555] uppercase font-black tracking-tighter">Action</span>
                              <div className="text-[10px] text-[#EDEDED] font-mono bg-[#141414] px-2 py-1 rounded">
-                               {action.type} {'->'} {action.value}
+                                                             {action.type} {'->'} {String(action.value ?? '')}
                              </div>
                           </div>
                         ))}
@@ -270,6 +310,7 @@ export const PropertiesPanel = () => {
                         actions: [{ type: 'setVariable', value: 10 }]
                       };
                       handleChange('interactions', [...(selectedNode.interactions || []), newInteraction]);
+                                            pushHistory();
                     }}
                     className="w-full py-2 border border-dashed border-[#2A2A2A] text-[10px] text-[#555] uppercase font-bold hover:border-indigo-500/50 hover:text-indigo-400 transition-colors rounded-lg"
                   >
@@ -289,12 +330,12 @@ export const PropertiesPanel = () => {
         {/* Alignment & Distribution Bar */}
         <div id="alignment-controls" className="grid grid-cols-6 border-b border-[#2A2A2A] h-10 divide-x divide-[#2A2A2A]">
             {[
-                { icon: AlignLeft, action: () => (useStore.getState() as any).alignSelected('left'), label: 'Align Left' },
-                { icon: CenterHorizontalIcon, action: () => (useStore.getState() as any).alignSelected('center-h'), label: 'Align Horizontal Center' },
-                { icon: AlignRight, action: () => (useStore.getState() as any).alignSelected('right'), label: 'Align Right' },
-                { icon: AlignTop, action: () => (useStore.getState() as any).alignSelected('top'), label: 'Align Top' },
-                { icon: CenterVerticalIcon, action: () => (useStore.getState() as any).alignSelected('center-v'), label: 'Align Vertical Center' },
-                { icon: AlignBottom, action: () => (useStore.getState() as any).alignSelected('bottom'), label: 'Align Bottom' },
+                { icon: AlignLeft, action: () => alignSelected('left'), label: 'Align Left' },
+                { icon: CenterHorizontalIcon, action: () => alignSelected('center-h'), label: 'Align Horizontal Center' },
+                { icon: AlignRight, action: () => alignSelected('right'), label: 'Align Right' },
+                { icon: AlignTop, action: () => alignSelected('top'), label: 'Align Top' },
+                { icon: CenterVerticalIcon, action: () => alignSelected('center-v'), label: 'Align Vertical Center' },
+                { icon: AlignBottom, action: () => alignSelected('bottom'), label: 'Align Bottom' },
             ].map((item, i) => (
                 <button 
                     key={i} 
@@ -339,7 +380,18 @@ export const PropertiesPanel = () => {
                     onBlur={handleBlur}
                     prefix={<ScrubLabel label="H" value={selectedNode.height} onChange={(v) => handleChange('height', v)} onBlur={handleBlur} />}
                 />
-                <button className="absolute -right-1 group-hover:right-1 px-1 opacity-0 group-hover:opacity-100 transition-all text-[#555] hover:text-[#888]"><Combine size={10} /></button>
+                <button 
+                    onClick={() => {
+                        const next = Math.max(1, Math.round((selectedNode.width + selectedNode.height) / 2));
+                        handleChange('width', next);
+                        handleChange('height', next);
+                        pushHistory();
+                    }}
+                    title="Make Square"
+                    className="absolute -right-1 group-hover:right-1 px-1 opacity-0 group-hover:opacity-100 transition-all text-[#555] hover:text-[#888]"
+                >
+                    <Combine size={10} />
+                </button>
             </div>
             <div className="flex items-center gap-2 px-4">
                  <InputField 
@@ -353,14 +405,15 @@ export const PropertiesPanel = () => {
                     <InputField 
                         value={Math.round(selectedNode.cornerRadius || 0)} 
                         onChange={(val) => {
-                            const r = parseInt(val) || 0;
+                            const r = parseNonNegativeInt(val);
                             handleChange('cornerRadius', r);
                             handleChange('individualCornerRadius', { topLeft: r, topRight: r, bottomRight: r, bottomLeft: r });
                         }}
                         onBlur={handleBlur}
                         prefix={<ScrubLabel label="CR" value={selectedNode.cornerRadius || 0} onChange={(v) => {
-                            handleChange('cornerRadius', v);
-                            handleChange('individualCornerRadius', { topLeft: v, topRight: v, bottomRight: v, bottomLeft: v });
+                            const safeRadius = clampNonNegative(v);
+                            handleChange('cornerRadius', safeRadius);
+                            handleChange('individualCornerRadius', { topLeft: safeRadius, topRight: safeRadius, bottomRight: safeRadius, bottomLeft: safeRadius });
                         }} onBlur={handleBlur} icon={Square} />}
                     />
                     <button 
@@ -376,22 +429,22 @@ export const PropertiesPanel = () => {
                 <div className="px-4 grid grid-cols-2 gap-2">
                     <InputField 
                         value={selectedNode.individualCornerRadius?.topLeft || 0} 
-                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, topLeft: parseInt(v) || 0 })}
+                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, topLeft: parseNonNegativeInt(v) })}
                         prefix={<span className="text-[9px] text-[#666]">TL</span>}
                     />
                     <InputField 
                         value={selectedNode.individualCornerRadius?.topRight || 0} 
-                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, topRight: parseInt(v) || 0 })}
+                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, topRight: parseNonNegativeInt(v) })}
                         prefix={<span className="text-[9px] text-[#666]">TR</span>}
                     />
                     <InputField 
                         value={selectedNode.individualCornerRadius?.bottomRight || 0} 
-                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, bottomRight: parseInt(v) || 0 })}
+                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, bottomRight: parseNonNegativeInt(v) })}
                         prefix={<span className="text-[9px] text-[#666]">BR</span>}
                     />
                     <InputField 
                         value={selectedNode.individualCornerRadius?.bottomLeft || 0} 
-                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, bottomLeft: parseInt(v) || 0 })}
+                        onChange={(v) => handleChange('individualCornerRadius', { ...selectedNode.individualCornerRadius, bottomLeft: parseNonNegativeInt(v) })}
                         prefix={<span className="text-[9px] text-[#666]">BL</span>}
                     />
                 </div>
@@ -409,6 +462,9 @@ export const PropertiesPanel = () => {
                     <div className="w-8 h-4 bg-[#2C2C2C] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#888] after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600 peer-checked:after:bg-white"></div>
                     <span className="ml-2 text-[10px] text-[#EDEDED] font-medium">Use as Mask</span>
                 </label>
+            </div>
+            <div className="px-4 pt-1 text-[10px] text-[#666] leading-4">
+                A mask clips sibling layers that come after it in the same parent.
             </div>
         </div>
 
@@ -456,8 +512,7 @@ export const PropertiesPanel = () => {
         </div>
 
         {/* Resizing / Constraints */}
-        {!isFrame && (
-            <div className="py-4 border-b border-[#2A2A2A]">
+        <div className="py-4 border-b border-[#2A2A2A]">
                 <SectionHeader title="Resizing" />
                 <div className="px-4 space-y-3">
                     {selectedNode.type === 'text' ? (
@@ -491,7 +546,10 @@ export const PropertiesPanel = () => {
                         <div className="grid grid-cols-2 gap-2">
                              <select 
                                 value={selectedNode.horizontalResizing} 
-                                onChange={(e) => handleChange('horizontalResizing', e.target.value)}
+                                onChange={(e) => {
+                                    handleChange('horizontalResizing', e.target.value);
+                                    pushHistory();
+                                }}
                                 className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
                             >
                                 <option value="fixed">Fixed</option>
@@ -500,7 +558,10 @@ export const PropertiesPanel = () => {
                             </select>
                             <select 
                                 value={selectedNode.verticalResizing} 
-                                onChange={(e) => handleChange('verticalResizing', e.target.value)}
+                                onChange={(e) => {
+                                    handleChange('verticalResizing', e.target.value);
+                                    pushHistory();
+                                }}
                                 className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
                             >
                                 <option value="fixed">Fixed</option>
@@ -511,18 +572,33 @@ export const PropertiesPanel = () => {
                     )}
                 </div>
             </div>
-        )}
 
         {/* Layout Section */}
         {isFrame && (
             <div id="layout-controls" className="border-b border-[#2A2A2A] pb-4">
-                <SectionHeader title="Layout" actions={<button className="p-1 text-[#888]"><Combine size={12} /></button>} />
+                <SectionHeader title="Layout" actions={
+                    <button 
+                        onClick={() => {
+                            const frameNode = selectedNode as FrameNode;
+                            const next = frameNode.justifyContent === 'space-between' ? 'start' : 'space-between';
+                            handleChange('justifyContent', next);
+                            pushHistory();
+                        }}
+                        className="p-1 text-[#888] hover:text-white"
+                        title="Toggle Space Between"
+                    >
+                        <Combine size={12} />
+                    </button>
+                } />
                 <div className="px-4 space-y-3">
                     <div className="flex gap-1 p-1 bg-[#2C2C2C] rounded-sm">
                         {['none', 'horizontal', 'vertical', 'grid'].map((m) => (
                             <button 
                                 key={m}
-                                onClick={() => handleChange('layoutMode', m)}
+                                onClick={() => {
+                                    handleChange('layoutMode', m);
+                                    pushHistory();
+                                }}
                                 className={`flex-1 h-6 rounded-xs text-[10px] uppercase font-bold flex items-center justify-center transition-all ${
                                     (selectedNode as FrameNode).layoutMode === m ? 'bg-[#1E1E1E] text-white shadow-sm' : 'text-[#888] hover:text-[#DDD]'
                                 }`}
@@ -534,6 +610,54 @@ export const PropertiesPanel = () => {
                             </button>
                         ))}
                     </div>
+
+                    {(selectedNode as FrameNode).layoutMode === 'grid' && (
+                        <div className="grid grid-cols-2 gap-2">
+                            <InputField 
+                                value={(selectedNode as FrameNode).gridColumns || 2}
+                                onChange={(v) => handleChange('gridColumns', Math.max(1, parseInt(v) || 1))}
+                                onBlur={handleBlur}
+                                prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Cols</span>}
+                            />
+                            <InputField 
+                                value={(selectedNode as FrameNode).gridRows || 2}
+                                onChange={(v) => handleChange('gridRows', Math.max(1, parseInt(v) || 1))}
+                                onBlur={handleBlur}
+                                prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Rows</span>}
+                            />
+                        </div>
+                    )}
+
+                    {(selectedNode as FrameNode).layoutMode !== 'none' && (
+                        <div className="grid grid-cols-2 gap-2">
+                            <select
+                                value={(selectedNode as FrameNode).justifyContent}
+                                onChange={(e) => {
+                                    handleChange('justifyContent', e.target.value);
+                                    pushHistory();
+                                }}
+                                className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                            >
+                                <option value="start">Main: Start</option>
+                                <option value="center">Main: Center</option>
+                                <option value="end">Main: End</option>
+                                <option value="space-between">Main: Space Between</option>
+                            </select>
+                            <select
+                                value={(selectedNode as FrameNode).alignItems}
+                                onChange={(e) => {
+                                    handleChange('alignItems', e.target.value);
+                                    pushHistory();
+                                }}
+                                className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                            >
+                                <option value="start">Cross: Start</option>
+                                <option value="center">Cross: Center</option>
+                                <option value="end">Cross: End</option>
+                                <option value="stretch">Cross: Stretch</option>
+                            </select>
+                        </div>
+                    )}
                     
                     {(selectedNode as FrameNode).layoutMode !== 'none' && (
                         <div className="grid grid-cols-2 gap-2">
@@ -555,7 +679,7 @@ export const PropertiesPanel = () => {
                                             <button 
                                                 key={i}
                                                 onClick={() => {
-                                                    updateNode(selectedNode.id, props as any);
+                                                    updateNode(selectedNode.id, props as Partial<FrameNode>);
                                                     pushHistory();
                                                 }}
                                                 className={`w-full h-full rounded-[1px] transition-all ${
@@ -666,8 +790,26 @@ export const PropertiesPanel = () => {
         <div id="appearance-controls" className="border-b border-[#2A2A2A] pb-4">
             <SectionHeader title="Appearance" actions={
                 <>
-                    <button className="p-1 text-[#888] hover:text-white transition-colors"><Layers size={14} /></button>
-                    <button className="p-1 text-[#888] hover:text-white transition-colors"><Database size={14} /></button>
+                    <button 
+                        onClick={() => {
+                            handleChange('visible', !selectedNode.visible);
+                            pushHistory();
+                        }}
+                        className="p-1 text-[#888] hover:text-white transition-colors"
+                        title={selectedNode.visible ? 'Hide Layer' : 'Show Layer'}
+                    >
+                        <Layers size={14} />
+                    </button>
+                    <button 
+                        onClick={() => {
+                            const color = (selectedNode.fills || []).find((f) => f.visible !== false && f.type === 'solid')?.color || '#FFFFFF';
+                            addVariable({ name: `${selectedNode.name} Color`, type: 'color', value: color });
+                        }}
+                        className="p-1 text-[#888] hover:text-white transition-colors"
+                        title="Create Color Variable"
+                    >
+                        <Database size={14} />
+                    </button>
                 </>
             } />
             <div className="px-4 space-y-3">
@@ -705,12 +847,19 @@ export const PropertiesPanel = () => {
 
                 <div className="flex items-center justify-between">
                     <span className="text-[11px] text-[#888]">Blend Mode</span>
-                    <select className="bg-transparent text-[11px] text-[#EDEDED] font-medium outline-none cursor-pointer">
-                        <option>Pass through</option>
-                        <option>Normal</option>
-                        <option>Multiply</option>
-                        <option>Screen</option>
-                        <option>Overlay</option>
+                    <select 
+                        value={selectedNode.blendMode || 'normal'}
+                        onChange={(e) => {
+                            handleChange('blendMode', e.target.value);
+                            pushHistory();
+                        }}
+                        className="bg-transparent text-[11px] text-[#EDEDED] font-medium outline-none cursor-pointer"
+                    >
+                        <option value="pass-through">Pass through</option>
+                        <option value="normal">Normal</option>
+                        <option value="multiply">Multiply</option>
+                        <option value="screen">Screen</option>
+                        <option value="overlay">Overlay</option>
                     </select>
                 </div>
             </div>
@@ -720,17 +869,17 @@ export const PropertiesPanel = () => {
         <div className="border-b border-[#2A2A2A] pb-4">
             <SectionHeader title="Variables" actions={
                 <button 
-                  onClick={() => (useStore.getState() as any).addVariable({ name: 'Token', type: 'color', value: '#FFFFFF' })}
+                                    onClick={() => addVariable({ name: 'Token', type: 'color', value: '#FFFFFF' })}
                   className="p-1 text-indigo-400 hover:text-indigo-300 transition-colors"
                 >
                   <Database size={14} />
                 </button>
             } />
             <div className="px-4 space-y-2">
-                {useStore.getState().variables.length === 0 ? (
+                                {variables.length === 0 ? (
                     <div className="text-[10px] text-[#555] italic">No variables defined</div>
                 ) : (
-                    useStore.getState().variables.map(v => (
+                                        variables.map(v => (
                         <div key={v.id} className="flex items-center gap-2 group">
                              <div className="w-4 h-4 rounded-full border border-[#2A2A2A]" style={{ backgroundColor: v.value as string }} />
                              <span className="text-[11px] text-[#A1A1A1] flex-1">{v.name}</span>
@@ -753,11 +902,29 @@ export const PropertiesPanel = () => {
                     >
                         <Plus size={14} />
                     </button>
-                    <button className="p-1 text-[#888] hover:text-white"><Database size={14} /></button>
+                    <button 
+                        onClick={() => {
+                            const colorVar = variables.find(v => v.type === 'color');
+                            if (!colorVar) return;
+                            const nextFills = [...(selectedNode.fills || [])];
+                            if (nextFills.length === 0) {
+                                nextFills.push({ id: uuidv4(), type: 'solid', color: String(colorVar.value), opacity: 1, visible: true });
+                            } else {
+                                nextFills[nextFills.length - 1] = { ...nextFills[nextFills.length - 1], color: String(colorVar.value) };
+                            }
+                            handleChange('fills', nextFills);
+                            handleChange('fill', String(colorVar.value));
+                            pushHistory();
+                        }}
+                        className="p-1 text-[#888] hover:text-white"
+                        title="Apply First Color Variable"
+                    >
+                        <Database size={14} />
+                    </button>
                 </div>
             } />
             <div className="px-4 space-y-2">
-                {(selectedNode.fills || []).map((paint: any, idx: number) => (
+                {(selectedNode.fills || []).map((paint: Paint, idx: number) => (
                     <div key={paint.id} className="flex items-center gap-2 group">
                         <div className="w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative">
                             <div 
@@ -771,7 +938,7 @@ export const PropertiesPanel = () => {
                                 type="color" 
                                 value={paint.color || '#D9D9D9'} 
                                 onChange={(e) => {
-                                    const next = [...selectedNode.fills];
+                                    const next = [...(selectedNode.fills || [])];
                                     next[idx] = { ...next[idx], color: e.target.value };
                                     handleChange('fills', next);
                                     if (idx === next.length - 1) handleChange('fill', e.target.value);
@@ -783,8 +950,9 @@ export const PropertiesPanel = () => {
                             <select 
                                 value={paint.type}
                                 onChange={(e) => {
-                                    const next = [...selectedNode.fills];
-                                    next[idx] = { ...next[idx], type: e.target.value };
+                                    const nextType = e.target.value as Paint['type'];
+                                    const next = [...(selectedNode.fills || [])];
+                                    next[idx] = { ...next[idx], type: nextType };
                                     if (e.target.value.startsWith('gradient') && !next[idx].gradientStops) {
                                         next[idx].gradientStops = [{ offset: 0, color: '#FFFFFF' }, { offset: 1, color: '#000000' }];
                                     }
@@ -800,7 +968,7 @@ export const PropertiesPanel = () => {
                                 <InputField 
                                     value={paint.color?.toUpperCase().replace('#', '') || ''} 
                                     onChange={(v) => {
-                                        const next = [...selectedNode.fills];
+                                        const next = [...(selectedNode.fills || [])];
                                         next[idx] = { ...next[idx], color: '#' + v };
                                         handleChange('fills', next);
                                     }}
@@ -808,15 +976,15 @@ export const PropertiesPanel = () => {
                                 />
                             ) : (
                                 <div className="flex-1 flex gap-1 items-center">
-                                    {(paint.gradientStops || []).map((stop: any, sidx: number) => (
+                                    {(paint.gradientStops || []).map((stop, sidx: number) => (
                                         <div key={sidx} className="relative w-4 h-4 rounded-full border border-[#444] overflow-hidden">
                                             <div className="w-full h-full" style={{ backgroundColor: stop.color }} />
                                             <input 
                                                 type="color" 
                                                 value={stop.color} 
                                                 onChange={(e) => {
-                                                    const nextFills = [...selectedNode.fills];
-                                                    const nextStops = [...nextFills[idx].gradientStops];
+                                                    const nextFills = [...(selectedNode.fills || [])];
+                                                    const nextStops = [...(nextFills[idx].gradientStops || [])];
                                                     nextStops[sidx] = { ...nextStops[sidx], color: e.target.value };
                                                     nextFills[idx] = { ...nextFills[idx], gradientStops: nextStops };
                                                     handleChange('fills', nextFills);
@@ -831,7 +999,7 @@ export const PropertiesPanel = () => {
                         <InputField 
                             value={Math.round(paint.opacity * 100)} 
                             onChange={(v) => {
-                                const next = [...selectedNode.fills];
+                                const next = [...(selectedNode.fills || [])];
                                 next[idx] = { ...next[idx], opacity: (parseInt(v) || 0) / 100 };
                                 handleChange('fills', next);
                             }}
@@ -841,7 +1009,7 @@ export const PropertiesPanel = () => {
                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button 
                                 onClick={() => {
-                                    const next = [...selectedNode.fills];
+                                    const next = [...(selectedNode.fills || [])];
                                     next[idx].visible = !next[idx].visible;
                                     handleChange('fills', next);
                                 }}
@@ -851,7 +1019,7 @@ export const PropertiesPanel = () => {
                             </button>
                             <button 
                                 onClick={() => {
-                                    const next = selectedNode.fills.filter((_: any, i: number) => i !== idx);
+                                    const next = (selectedNode.fills || []).filter((_: Paint, i: number) => i !== idx);
                                     handleChange('fills', next);
                                 }}
                                 className="p-1 text-[#555] hover:text-[#FF4D4D]"
@@ -883,7 +1051,7 @@ export const PropertiesPanel = () => {
                 </div>
              } />
              <div className="px-4 space-y-2">
-                {(selectedNode.strokes || []).map((paint: any, idx: number) => (
+                {(selectedNode.strokes || []).map((paint: Paint, idx: number) => (
                     <div key={paint.id} className="flex flex-col gap-2 group p-2 bg-[#2C2C2C]/30 rounded-sm">
                         <div className="flex items-center gap-2">
                             <div className="w-8 h-8 rounded-sm overflow-hidden border border-[#2A2A2A] bg-[#2C2C2C] relative">
@@ -892,7 +1060,7 @@ export const PropertiesPanel = () => {
                                     type="color" 
                                     value={paint.color || '#000000'} 
                                     onChange={(e) => {
-                                        const next = [...selectedNode.strokes];
+                                        const next = [...(selectedNode.strokes || [])];
                                         next[idx] = { ...next[idx], color: e.target.value };
                                         handleChange('strokes', next);
                                         if (idx === next.length - 1) handleChange('stroke', e.target.value);
@@ -903,7 +1071,7 @@ export const PropertiesPanel = () => {
                             <InputField 
                                 value={paint.color?.toUpperCase().replace('#', '') || ''} 
                                 onChange={(v) => {
-                                    const next = [...selectedNode.strokes];
+                                    const next = [...(selectedNode.strokes || [])];
                                     next[idx] = { ...next[idx], color: '#' + v };
                                     handleChange('strokes', next);
                                     if (idx === next.length - 1) handleChange('stroke', '#' + v);
@@ -913,7 +1081,7 @@ export const PropertiesPanel = () => {
                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <button 
                                     onClick={() => {
-                                        const next = [...selectedNode.strokes];
+                                        const next = [...(selectedNode.strokes || [])];
                                         next[idx].visible = !next[idx].visible;
                                         handleChange('strokes', next);
                                     }}
@@ -923,7 +1091,7 @@ export const PropertiesPanel = () => {
                                 </button>
                                 <button 
                                     onClick={() => {
-                                        const next = selectedNode.strokes.filter((_: any, i: number) => i !== idx);
+                                        const next = (selectedNode.strokes || []).filter((_: Paint, i: number) => i !== idx);
                                         handleChange('strokes', next);
                                         if (next.length === 0) handleChange('strokeWidth', 0);
                                     }}
@@ -978,14 +1146,15 @@ export const PropertiesPanel = () => {
                 </button>
              } />
              <div className="px-4 space-y-2">
-                {(selectedNode.effects || []).map((effect: any, idx: number) => (
+                {(selectedNode.effects || []).map((effect: Effect, idx: number) => (
                     <div key={effect.id} className="space-y-2 group p-2 bg-[#1E1E1E] rounded-sm border border-[#2A2A2A] shadow-sm">
                         <div className="flex items-center gap-2">
                             <select 
                                 value={effect.type}
                                 onChange={(e) => {
-                                    const next = [...selectedNode.effects];
-                                    next[idx] = { ...next[idx], type: e.target.value };
+                                    const effectType = e.target.value as Effect['type'];
+                                    const next = [...(selectedNode.effects || [])];
+                                    next[idx] = { ...next[idx], type: effectType };
                                     handleChange('effects', next);
                                 }}
                                 className="bg-transparent text-[10px] text-[#EDEDED] font-bold uppercase outline-none cursor-pointer flex-1"
@@ -998,7 +1167,7 @@ export const PropertiesPanel = () => {
                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <button 
                                     onClick={() => {
-                                        const next = [...selectedNode.effects];
+                                        const next = [...(selectedNode.effects || [])];
                                         next[idx].visible = !next[idx].visible;
                                         handleChange('effects', next);
                                     }}
@@ -1008,7 +1177,7 @@ export const PropertiesPanel = () => {
                                 </button>
                                 <button 
                                     onClick={() => {
-                                        const next = selectedNode.effects.filter((_: any, i: number) => i !== idx);
+                                        const next = (selectedNode.effects || []).filter((_: Effect, i: number) => i !== idx);
                                         handleChange('effects', next);
                                     }}
                                     className="p-1 text-[#555] hover:text-[#FF4D4D]"
@@ -1022,19 +1191,19 @@ export const PropertiesPanel = () => {
                             <div className="space-y-2">
                                 <div className="grid grid-cols-2 gap-2">
                                     <InputField 
-                                        value={effect.offset.x} 
+                                        value={effect.offset?.x ?? 0} 
                                         onChange={(v) => {
-                                            const next = [...selectedNode.effects];
-                                            next[idx] = { ...next[idx], offset: { ...next[idx].offset, x: parseInt(v) || 0 } };
+                                            const next = [...(selectedNode.effects || [])];
+                                            next[idx] = { ...next[idx], offset: { ...(next[idx].offset || { x: 0, y: 0 }), x: parseInt(v) || 0 } };
                                             handleChange('effects', next);
                                         }}
                                         prefix={<span className="text-[9px] text-[#555] px-1 font-bold">X</span>}
                                     />
                                     <InputField 
-                                        value={effect.offset.y} 
+                                        value={effect.offset?.y ?? 0} 
                                         onChange={(v) => {
-                                            const next = [...selectedNode.effects];
-                                            next[idx] = { ...next[idx], offset: { ...next[idx].offset, y: parseInt(v) || 0 } };
+                                            const next = [...(selectedNode.effects || [])];
+                                            next[idx] = { ...next[idx], offset: { ...(next[idx].offset || { x: 0, y: 0 }), y: parseInt(v) || 0 } };
                                             handleChange('effects', next);
                                         }}
                                         prefix={<span className="text-[9px] text-[#555] px-1 font-bold">Y</span>}
@@ -1042,9 +1211,9 @@ export const PropertiesPanel = () => {
                                 </div>
                                 <div className="grid grid-cols-2 gap-2">
                                     <InputField 
-                                        value={effect.radius} 
+                                        value={effect.radius ?? 0} 
                                         onChange={(v) => {
-                                            const next = [...selectedNode.effects];
+                                            const next = [...(selectedNode.effects || [])];
                                             next[idx] = { ...next[idx], radius: parseInt(v) || 0 };
                                             handleChange('effects', next);
                                         }}
@@ -1052,25 +1221,26 @@ export const PropertiesPanel = () => {
                                     />
                                     <div className="flex-1 flex items-center bg-[#2C2C2C] border border-transparent rounded-sm px-1.5 h-7">
                                         <div className="w-4 h-4 rounded-full mr-1 border border-[#444] overflow-hidden">
-                                            <div className="w-full h-full" style={{ backgroundColor: effect.color.substring(0, 7) }} />
+                                            <div className="w-full h-full" style={{ backgroundColor: (effect.color || '#00000040').substring(0, 7) }} />
                                             <input 
                                                 type="color" 
-                                                value={effect.color.substring(0, 7)} 
+                                                value={(effect.color || '#00000040').substring(0, 7)} 
                                                 onChange={(e) => {
-                                                    const next = [...selectedNode.effects];
-                                                    const opacity = (parseInt(effect.color.substring(7), 16) || 255).toString(16).padStart(2, '0');
-                                                    next[idx] = { ...next[idx], color: e.target.value + (effect.color.length > 7 ? effect.color.substring(7) : '40') };
+                                                    const next = [...(selectedNode.effects || [])];
+                                                    const currentColor = effect.color || '#00000040';
+                                                    next[idx] = { ...next[idx], color: e.target.value + (currentColor.length > 7 ? currentColor.substring(7) : '40') };
                                                     handleChange('effects', next);
                                                 }}
                                                 className="absolute inset-0 opacity-0 cursor-pointer"
                                             />
                                         </div>
                                         <InputField 
-                                            value={Math.round((parseInt(effect.color.substring(7), 16) || 64) / 2.55)}
+                                            value={Math.round((parseInt((effect.color || '#00000040').substring(7), 16) || 64) / 2.55)}
                                             onChange={(v) => {
-                                                const next = [...selectedNode.effects];
+                                                const next = [...(selectedNode.effects || [])];
+                                                const currentColor = effect.color || '#00000040';
                                                 const hex = Math.min(255, Math.max(0, Math.round(parseInt(v) * 2.55))).toString(16).padStart(2, '0');
-                                                next[idx] = { ...next[idx], color: effect.color.substring(0, 7) + hex };
+                                                next[idx] = { ...next[idx], color: currentColor.substring(0, 7) + hex };
                                                 handleChange('effects', next);
                                             }}
                                             className="w-full bg-transparent border-none text-[9px]"
@@ -1083,9 +1253,9 @@ export const PropertiesPanel = () => {
 
                         {(effect.type === 'layer-blur' || effect.type === 'background-blur') && (
                             <InputField 
-                                value={effect.radius} 
+                                value={effect.radius ?? 0} 
                                 onChange={(v) => {
-                                    const next = [...selectedNode.effects];
+                                    const next = [...(selectedNode.effects || [])];
                                     next[idx] = { ...next[idx], radius: parseInt(v) || 0 };
                                     handleChange('effects', next);
                                 }}
@@ -1100,25 +1270,52 @@ export const PropertiesPanel = () => {
 
         {/* Export Section */}
         <div className="border-b border-[#2A2A2A] pb-4">
-             <SectionHeader title="Export" actions={<button className="p-1 text-[#888] hover:text-white"><Combine size={14} /></button>} />
+             <SectionHeader title="Export" actions={
+                <button 
+                    onClick={() => navigator.clipboard.writeText(exportToCode(selectedNodes))}
+                    className="p-1 text-[#888] hover:text-white"
+                    title="Copy Export"
+                >
+                    <Combine size={14} />
+                </button>
+             } />
              <div className="px-4 space-y-3">
                 <div className="flex gap-2">
-                    <InputField value="1x" onChange={() => {}} className="flex-1" suffix={<ChevronDown size={8} />} />
-                    <InputField value="PNG" onChange={() => {}} className="flex-1" suffix={<ChevronDown size={8} />} />
+                    <select
+                        value={exportScale}
+                        onChange={(e) => setExportScale(e.target.value)}
+                        className="flex-1 bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                    >
+                        <option value="1x">1x</option>
+                        <option value="2x">2x</option>
+                        <option value="3x">3x</option>
+                    </select>
+                    <select
+                        value={exportFormat}
+                        onChange={(e) => setExportFormat(e.target.value)}
+                        className="flex-1 bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                    >
+                        <option value="TSX">TSX</option>
+                        <option value="TXT">TXT</option>
+                        <option value="JSON">JSON</option>
+                    </select>
                 </div>
                 <button 
                     onClick={() => {
-                        const code = exportToCode(selectedNodes);
-                        const blob = new Blob([code], { type: 'text/plain' });
+                        const payload = exportFormat === 'JSON'
+                            ? JSON.stringify(selectedNodes, null, 2)
+                            : exportToCode(selectedNodes);
+                        const blob = new Blob([payload], { type: 'text/plain' });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
-                        a.download = `${selectedNode.name.toLowerCase()}.txt`;
+                        const extension = exportFormat.toLowerCase();
+                        a.download = `${selectedNode.name.toLowerCase()}_${exportScale}.${extension}`;
                         a.click();
                     }}
                     className="w-full py-1.5 bg-[#2C2C2C] hover:bg-[#333] transition-colors text-[11px] font-bold text-[#EDEDED] rounded-sm border border-[#2A2A2A]"
                 >
-                    Export {selectedNode.name}
+                    Export {selectedNode.name} ({exportScale} {exportFormat})
                 </button>
              </div>
         </div>
@@ -1131,7 +1328,7 @@ export const PropertiesPanel = () => {
                   <label className="text-[9px] text-[#555] font-bold uppercase tracking-widest">Font Family</label>
                   <div className="relative">
                     <select 
-                        value={(selectedNode as any).fontFamily}
+                        value={selectedTextNode?.fontFamily || ''}
                         onChange={(e) => handleFontChange(e.target.value)}
                         className="w-full bg-[#2C2C2C] border border-transparent focus:border-indigo-500/50 px-2 py-1.5 text-[11px] text-[#EDEDED] rounded-sm appearance-none cursor-pointer outline-none"
                     >
@@ -1144,13 +1341,13 @@ export const PropertiesPanel = () => {
                </div>
                <div className="grid grid-cols-2 gap-3">
                   <InputField 
-                    value={(selectedNode as any).fontSize} 
+                    value={selectedTextNode?.fontSize || 0} 
                     onChange={(v) => handleChange('fontSize', parseInt(v) || 0)}
                     onBlur={handleBlur}
                     prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Size</span>}
                   />
                   <InputField 
-                    value={(selectedNode as any).lineHeight || ''} 
+                    value={selectedTextNode?.lineHeight || ''} 
                     onChange={(v) => handleChange('lineHeight', parseInt(v) || 0)}
                     onBlur={handleBlur}
                     prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">LH</span>}
@@ -1164,7 +1361,7 @@ export const PropertiesPanel = () => {
                         key={a}
                         onClick={() => handleChange('align', a)}
                         className={`flex-1 py-1 rounded-xs text-[8px] font-bold uppercase tracking-tight transition-all ${
-                            (selectedNode as any).align === a ? 'bg-[#1E1E1E] text-white shadow-sm' : 'text-[#555] hover:text-[#A1A1A1]'
+                            selectedTextNode?.align === a ? 'bg-[#1E1E1E] text-white shadow-sm' : 'text-[#555] hover:text-[#A1A1A1]'
                         }`}
                         >
                         {a}

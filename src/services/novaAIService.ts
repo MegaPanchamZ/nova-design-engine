@@ -4,9 +4,9 @@ import { AIMessage, SceneNode } from "../types";
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 const nodesToHTMContext = (nodes: SceneNode[]): string => {
-    const buildHTML = (id?: string) => {
+  const buildHTML = (id?: string): string => {
         const children = nodes.filter(n => n.parentId === id);
-        return children.map(n => {
+    return children.map((n): string => {
             let style = `position: absolute; left: ${Math.round(n.x)}px; top: ${Math.round(n.y)}px; width: ${Math.round(n.width)}px; height: ${Math.round(n.height)}px; background: ${n.fill};`;
             if (n.type === 'text') {
                 return `<p id="${n.id}" style="${style} font-size: ${n.fontSize}px; font-family: ${n.fontFamily};">${n.text}</p>`;
@@ -126,7 +126,7 @@ export const generateUI = async (prompt: string, history: AIMessage[] = [], cont
 
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview", 
-      contents: contents as any,
+      contents,
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0.7,

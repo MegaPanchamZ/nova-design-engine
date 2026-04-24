@@ -6,15 +6,15 @@ export interface Variable {
   id: string;
   name: string;
   type: 'color' | 'number' | 'string' | 'boolean';
-  value: any;
-  modeValues?: Record<string, any>; // For Light/Dark modes
+  value: unknown;
+  modeValues?: Record<string, unknown>; // For Light/Dark modes
 }
 
 export interface Style {
   id: string;
   name: string;
   type: 'text' | 'color' | 'effect' | 'layout';
-  properties: any;
+  properties: Record<string, unknown>;
 }
 
 export interface Interaction {
@@ -23,12 +23,12 @@ export interface Interaction {
   condition?: {
       variableId: string;
       operator: '==' | '!=' | '>' | '<' | '>=' | '<=';
-      value: any;
+      value: unknown;
   };
   actions: {
       type: 'navigate' | 'setVariable' | 'toggleVisibility';
       targetId?: string; // Page ID or Node ID or Variable ID
-      value?: any;
+      value?: unknown;
   }[];
 }
 
@@ -71,6 +71,7 @@ export interface BaseNode {
   strokeWidth: number;
   strokeAlign?: 'inside' | 'outside' | 'center';
   opacity: number;
+  blendMode: 'pass-through' | 'normal' | 'multiply' | 'screen' | 'overlay';
   visible: boolean;
   locked: boolean;
   collapsed?: boolean; // For frames/groups in layers panel
@@ -96,7 +97,7 @@ export interface BaseNode {
 }
 
 export interface FrameNode extends BaseNode {
-  type: 'frame';
+  type: 'frame' | 'section' | 'group' | 'component' | 'instance';
   layoutMode: 'none' | 'horizontal' | 'vertical' | 'grid';
   padding: { top: number; right: number; bottom: number; left: number };
   gap: number;
@@ -154,7 +155,7 @@ export interface Page {
 export interface ImageNode extends BaseNode {
   type: 'image';
   src: string;
-  imageScaleMode?: 'fill' | 'fit' | 'crop' | 'tile';
+  imageScaleMode?: 'fill' | 'fit' | 'tile' | 'stretch';
   imageScale?: number;
   imageTransform?: {
     x: number;
@@ -164,7 +165,7 @@ export interface ImageNode extends BaseNode {
   };
 }
 
-export type SceneNode = RectNode | CircleNode | EllipseNode | TextNode | PathNode | BooleanNode | FrameNode | ImageNode | any;
+export type SceneNode = RectNode | CircleNode | EllipseNode | TextNode | PathNode | BooleanNode | FrameNode | ImageNode;
 
 export interface Viewport {
   x: number;
@@ -198,7 +199,7 @@ export interface AITweak {
   targetProperty: string;
   min?: number;
   max?: number;
-  value: any;
+  value: unknown;
 }
 
 export interface ExportOptions {
@@ -244,6 +245,7 @@ export const createDefaultNode = (type: NodeType, x: number, y: number, id?: str
     stroke: '#000000',
     strokeWidth: 1,
     opacity: 1,
+      blendMode: 'normal',
     visible: true,
     locked: false,
     draggable: true,
@@ -274,20 +276,25 @@ export const createDefaultNode = (type: NodeType, x: number, y: number, id?: str
     case 'path':
       return { ...base, type: 'path', data: '' } as PathNode;
     case 'frame':
+    case 'section':
+    case 'group':
+    case 'component':
+    case 'instance':
       return { 
         ...base, 
-        type: 'frame', 
+        type,
         layoutMode: 'none', 
         padding: { top: 0, right: 0, bottom: 0, left: 0 }, 
         gap: 0,
         justifyContent: 'start',
         alignItems: 'start',
-        clipsContent: true,
+        clipsContent: type === 'group' ? false : true,
         gridColumns: 1,
         gridRows: 1,
-        fill: '#f0f0f000', // Transparent default
-        stroke: '#A1A1A1',
-        strokeWidth: 0 // Default to 0 as per user request
+        fill: 'transparent',
+        fills: [],
+        stroke: type === 'component' || type === 'instance' ? '#A855F7' : '#7D7D7D',
+        strokeWidth: type === 'frame' || type === 'section' || type === 'component' ? 1 : 0
       } as FrameNode;
     case 'image':
       return { ...base, type: 'image', src: '', fill: '#E5E7EB', strokeWidth: 0, imageScaleMode: 'fill', imageScale: 1 } as ImageNode;

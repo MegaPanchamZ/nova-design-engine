@@ -98,8 +98,36 @@ export const exportToSVG = (nodes: SceneNode[]): string => {
   return svg;
 };
 
-export const exportToPDF = async (allNodes: SceneNode[], options: { type: 'digital' | 'print', scale?: number }) => {
-  const frames = allNodes.filter(n => n.type === 'frame' && !n.parentId) as FrameNode[];
+export const exportToPDF = async (allNodes: SceneNode[], options: { type: 'digital' | 'print', mode?: 'single' | 'frames', scale?: number }) => {
+  const parser = new DOMParser();
+
+  if ((options.mode || 'frames') === 'single') {
+    const svgStr = exportToSVG(allNodes);
+    const svgDoc = parser.parseFromString(svgStr, 'image/svg+xml');
+    const svgElement = svgDoc.documentElement as unknown as SVGElement;
+
+    const width = parseFloat(svgElement.getAttribute('width') || '0');
+    const height = parseFloat(svgElement.getAttribute('height') || '0');
+    if (!width || !height) return;
+
+    const pdf = new jsPDF({
+      orientation: width > height ? 'l' : 'p',
+      unit: 'pt',
+      format: [width, height]
+    });
+
+    await svg2pdf(svgElement, pdf, {
+      x: 0,
+      y: 0,
+      width,
+      height,
+    });
+
+    pdf.save(`export_${options.type}_single.pdf`);
+    return;
+  }
+
+  const frames = allNodes.filter(n => (n.type === 'frame' || n.type === 'section') && !n.parentId) as FrameNode[];
   if (frames.length === 0) return;
 
   // Create PDF
@@ -108,8 +136,6 @@ export const exportToPDF = async (allNodes: SceneNode[], options: { type: 'digit
     unit: 'pt',
     format: [frames[0].width, frames[0].height]
   });
-
-  const parser = new DOMParser();
 
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i];

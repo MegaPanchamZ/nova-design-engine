@@ -1,10 +1,259 @@
 import { create } from 'zustand';
-import { DesignState, SceneNode, ToolType, Viewport, createDefaultNode, FrameNode, Page, Variable, Style, TextNode, SnapLine } from './types';
+import { AITweak, DesignState, SceneNode, ToolType, Viewport, createDefaultNode, FrameNode, Page, Variable, Style, TextNode, SnapLine } from './types';
 import { calculateLayout } from './lib/layoutUtils';
 import { measureText } from './lib/measureText';
 import { v4 as uuidv4 } from 'uuid';
 import { generateUI, generateImage } from './services/novaAIService';
 import { parseHTMLToNodes } from './lib/htmlParser';
+
+interface ClipboardSnapshot {
+    nodes: SceneNode[];
+    rootIds: string[];
+    minX: number;
+    minY: number;
+}
+
+let clipboardSnapshot: ClipboardSnapshot | null = null;
+let pasteNudgeCount = 0;
+const MAX_CANVAS_COORD = 1_000_000;
+const MAX_CANVAS_SIZE = 1_000_000;
+
+const deepClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const sanitizeCoordinate = (value: number, fallback = 0): number => {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, value));
+};
+
+const sanitizeSize = (value: number, fallback = 1): number => {
+    if (!Number.isFinite(value)) return Math.max(1, fallback);
+    return Math.max(1, Math.min(MAX_CANVAS_SIZE, Math.abs(value)));
+};
+
+const sanitizeUnitInterval = (value: number, fallback = 0): number => {
+    if (!Number.isFinite(value)) return Math.min(1, Math.max(0, fallback));
+    return Math.min(1, Math.max(0, value));
+};
+
+const sanitizeCornerValue = (value: number, fallback: number, maxCornerRadius: number): number => {
+    const safeFallback = Number.isFinite(fallback) ? fallback : 0;
+    if (!Number.isFinite(value)) return Math.min(maxCornerRadius, Math.max(0, safeFallback));
+    return Math.min(maxCornerRadius, Math.max(0, value));
+};
+
+const sanitizeNodeGeometry = (node: SceneNode, fallback?: SceneNode): SceneNode => {
+    const safeWidth = sanitizeSize(node.width, fallback?.width ?? 1);
+    const safeHeight = sanitizeSize(node.height, fallback?.height ?? 1);
+    const maxCornerRadius = Math.max(0, Math.min(safeWidth, safeHeight) / 2);
+
+    const fallbackRadius = fallback?.cornerRadius ?? 0;
+    const fallbackCorners = fallback?.individualCornerRadius;
+
+    const normalizedCornerRadius = sanitizeCornerValue(node.cornerRadius ?? fallbackRadius, fallbackRadius, maxCornerRadius);
+    const sourceCorners = node.individualCornerRadius ?? fallbackCorners;
+
+    return {
+        ...node,
+        x: sanitizeCoordinate(node.x, fallback?.x ?? 0),
+        y: sanitizeCoordinate(node.y, fallback?.y ?? 0),
+        width: safeWidth,
+        height: safeHeight,
+        cornerRadius: normalizedCornerRadius,
+        individualCornerRadius: sourceCorners
+            ? {
+                  topLeft: sanitizeCornerValue(
+                      sourceCorners.topLeft,
+                      fallbackCorners?.topLeft ?? normalizedCornerRadius,
+                      maxCornerRadius
+                  ),
+                  topRight: sanitizeCornerValue(
+                      sourceCorners.topRight,
+                      fallbackCorners?.topRight ?? normalizedCornerRadius,
+                      maxCornerRadius
+                  ),
+                  bottomRight: sanitizeCornerValue(
+                      sourceCorners.bottomRight,
+                      fallbackCorners?.bottomRight ?? normalizedCornerRadius,
+                      maxCornerRadius
+                  ),
+                  bottomLeft: sanitizeCornerValue(
+                      sourceCorners.bottomLeft,
+                      fallbackCorners?.bottomLeft ?? normalizedCornerRadius,
+                      maxCornerRadius
+                  ),
+              }
+            : undefined,
+        cornerSmoothing: sanitizeUnitInterval(node.cornerSmoothing ?? 0, fallback?.cornerSmoothing ?? 0),
+    };
+};
+
+const isFrameLike = (node: SceneNode): node is FrameNode =>
+    node.type === 'frame' ||
+    node.type === 'section' ||
+    node.type === 'group' ||
+    node.type === 'component' ||
+    node.type === 'instance';
+
+const getNodeById = (nodes: SceneNode[], id: string | undefined): SceneNode | undefined => {
+    if (!id) return undefined;
+    return nodes.find((node) => node.id === id);
+};
+
+const getGlobalPosition = (nodes: SceneNode[], nodeId: string | undefined): { x: number; y: number } => {
+    const node = getNodeById(nodes, nodeId);
+    if (!node) return { x: 0, y: 0 };
+    const parentPos = getGlobalPosition(nodes, node.parentId);
+    return { x: parentPos.x + node.x, y: parentPos.y + node.y };
+};
+
+const collectDescendantIds = (nodes: SceneNode[], nodeId: string, acc: Set<string>): void => {
+    const children = nodes.filter((node) => node.parentId === nodeId);
+    children.forEach((child) => {
+        acc.add(child.id);
+        collectDescendantIds(nodes, child.id, acc);
+    });
+};
+
+const getTopLevelSelectionIds = (nodes: SceneNode[], selectedIds: string[]): string[] => {
+    const selectedSet = new Set(selectedIds);
+    const topLevelIds = selectedIds.filter((id) => {
+        let parentId = getNodeById(nodes, id)?.parentId;
+        while (parentId) {
+            if (selectedSet.has(parentId)) return false;
+            parentId = getNodeById(nodes, parentId)?.parentId;
+        }
+        return true;
+    });
+
+    // Ensure we don't have duplicates and preserve order from selectedIds
+    return Array.from(new Set(topLevelIds));
+};
+
+const getCommonParentId = (nodes: SceneNode[], nodeIds: string[]): string | undefined | 'mixed' => {
+    if (nodeIds.length === 0) return undefined;
+    const firstParent = getNodeById(nodes, nodeIds[0])?.parentId;
+    for (let i = 1; i < nodeIds.length; i++) {
+        const parentId = getNodeById(nodes, nodeIds[i])?.parentId;
+        if (parentId !== firstParent) return 'mixed';
+    }
+    return firstParent;
+};
+
+const toUniqueIds = (ids: string[]): string[] => Array.from(new Set(ids));
+
+const parseAiTweaks = (rawTweaks: unknown, selectedIds: string[]): AITweak[] => {
+    if (!Array.isArray(rawTweaks)) return [];
+
+    return rawTweaks
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => {
+            const targetIdValue = typeof item.targetId === 'string' ? item.targetId : '';
+            const targetNodeId = targetIdValue === 'Selection' ? selectedIds[0] : targetIdValue;
+
+            return {
+                id: uuidv4(),
+                label: typeof item.label === 'string' ? item.label : 'Tweak',
+                type:
+                    item.type === 'slider' || item.type === 'color' || item.type === 'toggle' || item.type === 'action'
+                        ? item.type
+                        : 'slider',
+                targetNodeId: targetNodeId || selectedIds[0] || '',
+                targetProperty: typeof item.property === 'string' ? item.property : '',
+                min: typeof item.min === 'number' ? item.min : undefined,
+                max: typeof item.max === 'number' ? item.max : undefined,
+                value: item.value ?? 0,
+            } as AITweak;
+        })
+        .filter((tweak) => tweak.targetNodeId.length > 0 && tweak.targetProperty.length > 0);
+};
+
+const applyFrameSizingWithoutAutoLayout = (
+    frame: FrameNode,
+    children: SceneNode[],
+    allNodes: SceneNode[]
+): { frame: FrameNode; children: SceneNode[] } => {
+    const updatedFrame: FrameNode = {
+        ...frame,
+        x: sanitizeCoordinate(frame.x, 0),
+        y: sanitizeCoordinate(frame.y, 0),
+        width: sanitizeSize(frame.width, 100),
+        height: sanitizeSize(frame.height, 100),
+    };
+    const updatedChildren: SceneNode[] = children.map((child) => ({
+        ...child,
+        x: sanitizeCoordinate(child.x, 0),
+        y: sanitizeCoordinate(child.y, 0),
+        width: sanitizeSize(child.width, 1),
+        height: sanitizeSize(child.height, 1),
+    }));
+
+    const parentCandidate = getNodeById(allNodes, frame.parentId);
+    if (parentCandidate && isFrameLike(parentCandidate) && !updatedFrame.isAbsolute) {
+        const parentInnerWidth = sanitizeSize(parentCandidate.width - parentCandidate.padding.left - parentCandidate.padding.right, updatedFrame.width);
+        const parentInnerHeight = sanitizeSize(parentCandidate.height - parentCandidate.padding.top - parentCandidate.padding.bottom, updatedFrame.height);
+
+        if (updatedFrame.horizontalResizing === 'fill') {
+            updatedFrame.width = parentInnerWidth;
+            updatedFrame.x = parentCandidate.padding.left;
+        }
+        if (updatedFrame.verticalResizing === 'fill') {
+            updatedFrame.height = parentInnerHeight;
+            updatedFrame.y = parentCandidate.padding.top;
+        }
+    }
+
+    const getInnerWidth = () => sanitizeSize(updatedFrame.width - updatedFrame.padding.left - updatedFrame.padding.right, updatedFrame.width);
+    const getInnerHeight = () => sanitizeSize(updatedFrame.height - updatedFrame.padding.top - updatedFrame.padding.bottom, updatedFrame.height);
+
+    updatedChildren.forEach((child) => {
+        if (child.isAbsolute) return;
+        if (child.horizontalResizing === 'fill') {
+            child.width = getInnerWidth();
+            child.x = updatedFrame.padding.left;
+        }
+        if (child.verticalResizing === 'fill') {
+            child.height = getInnerHeight();
+            child.y = updatedFrame.padding.top;
+        }
+    });
+
+    if (updatedChildren.length > 0 && updatedFrame.horizontalResizing === 'hug') {
+        const targetMinX = updatedFrame.padding.left;
+        const minX = Math.min(...updatedChildren.map((child) => sanitizeCoordinate(child.x, 0)));
+        const shiftX = minX - targetMinX;
+
+        if (Number.isFinite(shiftX) && Math.abs(shiftX) > 0.001) {
+            updatedFrame.x = sanitizeCoordinate(updatedFrame.x + shiftX, updatedFrame.x);
+            updatedChildren.forEach((child) => {
+                child.x = sanitizeCoordinate(child.x - shiftX, child.x);
+            });
+        }
+
+        const maxX = Math.max(targetMinX, ...updatedChildren.map((child) => sanitizeCoordinate(child.x, 0) + sanitizeSize(child.width, 1)));
+        updatedFrame.width = sanitizeSize(maxX + updatedFrame.padding.right, updatedFrame.width);
+    }
+
+    if (updatedChildren.length > 0 && updatedFrame.verticalResizing === 'hug') {
+        const targetMinY = updatedFrame.padding.top;
+        const minY = Math.min(...updatedChildren.map((child) => sanitizeCoordinate(child.y, 0)));
+        const shiftY = minY - targetMinY;
+
+        if (Number.isFinite(shiftY) && Math.abs(shiftY) > 0.001) {
+            updatedFrame.y = sanitizeCoordinate(updatedFrame.y + shiftY, updatedFrame.y);
+            updatedChildren.forEach((child) => {
+                child.y = sanitizeCoordinate(child.y - shiftY, child.y);
+            });
+        }
+
+        const maxY = Math.max(targetMinY, ...updatedChildren.map((child) => sanitizeCoordinate(child.y, 0) + sanitizeSize(child.height, 1)));
+        updatedFrame.height = sanitizeSize(maxY + updatedFrame.padding.bottom, updatedFrame.height);
+    }
+
+    return {
+        frame: updatedFrame,
+        children: updatedChildren,
+    };
+};
 
 interface DesignStore extends DesignState {
   setTool: (tool: ToolType) => void;
@@ -28,6 +277,10 @@ interface DesignStore extends DesignState {
   sendAIChat: (message: string) => Promise<void>;
   generateUIFromPrompt: (prompt: string) => Promise<void>;
   groupSelected: () => void;
+    frameSelected: () => void;
+    copySelected: () => void;
+    pasteCopied: (x?: number, y?: number) => void;
+    canPaste: () => boolean;
   alignSelected: (alignment: 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom' | 'distribute-h' | 'distribute-v') => void;
   selectMatching: () => void;
   reorderNode: (id: string, index: number) => void;
@@ -35,6 +288,7 @@ interface DesignStore extends DesignState {
   // Variables & Styles
   addVariable: (variable: Omit<Variable, 'id'>) => void;
   addStyle: (style: Omit<Style, 'id'>) => void;
+    mutateVariable: (id: string, newValue: unknown) => void;
   // History
   undo: () => void;
   redo: () => void;
@@ -128,17 +382,11 @@ export const useStore = create<DesignStore>((set, get) => ({
         }
     }
     
-    let tweaks: any[] = [];
+    let tweaks: AITweak[] = [];
     if (tweaksStr) {
         try {
-            const rawTweaks = JSON.parse(tweaksStr);
-            tweaks = rawTweaks.map((t: any) => ({
-                id: uuidv4(),
-                ...t,
-                targetNodeId: t.targetId === 'Selection' ? selectedIds[0] : t.targetId,
-                targetProperty: t.property,
-                value: t.value || 0
-            }));
+            const rawTweaks: unknown = JSON.parse(tweaksStr);
+            tweaks = parseAiTweaks(rawTweaks, selectedIds);
         } catch (e) {
             console.error("Tweak parse error", e);
         }
@@ -214,29 +462,36 @@ export const useStore = create<DesignStore>((set, get) => ({
     const currentPage = state.pages.find(p => p.id === state.currentPageId);
     if (!currentPage) return state;
 
-    let newNodes = [...currentPage.nodes, node];
+        let nodeToInsert = sanitizeNodeGeometry(node);
     
     // Initial measurement for text nodes
-    if (node.type === 'text') {
-        const textNode = node as TextNode;
+        if (nodeToInsert.type === 'text') {
+                const textNode = nodeToInsert as TextNode;
         const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill') ? textNode.width : undefined;
         const metrics = measureText(textNode.text, textNode.fontSize, textNode.fontFamily, maxWidth, textNode.lineHeight);
-        if (textNode.horizontalResizing === 'hug') (node as any).width = metrics.width;
-        if (textNode.verticalResizing === 'hug') (node as any).height = metrics.height;
+                nodeToInsert = sanitizeNodeGeometry({
+                    ...textNode,
+                    width: textNode.horizontalResizing === 'hug' ? metrics.width : textNode.width,
+                    height: textNode.verticalResizing === 'hug' ? metrics.height : textNode.height,
+                }, nodeToInsert);
     }
+
+        let newNodes = [...currentPage.nodes, nodeToInsert];
 
     // Recursive Layout Trigger for New Node
     const runLayoutRecursively = (targetId: string, nodes: SceneNode[]): SceneNode[] => {
         const n = nodes.find(x => x.id === targetId);
         if (!n) return nodes;
 
-        const frameId = n.type === 'frame' ? n.id : n.parentId;
+        const frameId = isFrameLike(n) ? n.id : n.parentId;
         if (!frameId) return nodes;
 
         const frame = nodes.find(x => x.id === frameId);
-        if (frame && frame.type === 'frame' && frame.layoutMode !== 'none') {
+        if (frame && isFrameLike(frame)) {
             const children = nodes.filter(x => x.parentId === frameId);
-            const { frame: updatedFrame, children: updatedChildren } = calculateLayout(frame, children);
+            const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
+                ? calculateLayout(frame, children)
+                : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
             
             let nextNodes = nodes.map(x => {
                 if (x.id === updatedFrame.id) return updatedFrame;
@@ -257,10 +512,10 @@ export const useStore = create<DesignStore>((set, get) => ({
         return nodes;
     };
 
-    newNodes = runLayoutRecursively(node.id, newNodes);
+        newNodes = runLayoutRecursively(nodeToInsert.id, newNodes);
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-    return { pages, selectedIds: [node.id] };
+        return { pages, selectedIds: [nodeToInsert.id] };
   }),
 
   updateNode: (id, updates) => set((state) => {
@@ -280,13 +535,16 @@ export const useStore = create<DesignStore>((set, get) => ({
             }
 
             // Text sync logic
-            if (updates.text !== undefined && updated.isAutoName) {
-                updated.name = updates.text || 'Text';
+            const textUpdates = updates as Partial<TextNode>;
+            if (textUpdates.text !== undefined && updated.isAutoName) {
+                updated.name = textUpdates.text || 'Text';
             }
+
+            updated = sanitizeNodeGeometry(updated, n);
             if (updates.name !== undefined) {
                 if (updates.name.trim() === '') {
                     updated.isAutoName = true;
-                    if (updated.type === 'text') updated.name = (updated as any).text || 'Text';
+                    if (updated.type === 'text') updated.name = updated.text || 'Text';
                 } else {
                     updated.isAutoName = false;
                 }
@@ -313,7 +571,7 @@ export const useStore = create<DesignStore>((set, get) => ({
     const hasSpatialUpdate = updates.x !== undefined || updates.y !== undefined;
     if (node && node.parentId && !node.isAbsolute && hasSpatialUpdate) {
         const parent = newNodes.find(n => n.id === node.parentId);
-        if (parent && parent.type === 'frame' && parent.layoutMode !== 'none') {
+        if (parent && (parent.type === 'frame' || parent.type === 'section' || parent.type === 'group' || parent.type === 'component' || parent.type === 'instance') && parent.layoutMode !== 'none') {
             // Only consider non-absolute siblings for reordering
             const layoutSiblings = newNodes.filter(n => n.parentId === node.parentId && !n.isAbsolute && n.id !== node.id);
             let newIndex = layoutSiblings.length;
@@ -367,13 +625,15 @@ export const useStore = create<DesignStore>((set, get) => ({
         const node = nodes.find(n => n.id === targetId);
         if (!node) return nodes;
 
-        const frameId = node.type === 'frame' ? node.id : node.parentId;
+        const frameId = isFrameLike(node) ? node.id : node.parentId;
         if (!frameId) return nodes;
 
         const frame = nodes.find(n => n.id === frameId);
-        if (frame && frame.type === 'frame' && frame.layoutMode !== 'none') {
+        if (frame && isFrameLike(frame)) {
             const children = nodes.filter(n => n.parentId === frameId);
-            const { frame: updatedFrame, children: updatedChildren } = calculateLayout(frame, children);
+            const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
+                ? calculateLayout(frame, children)
+                : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
             
             let nextNodes = nodes.map(n => {
                 if (n.id === updatedFrame.id) return updatedFrame;
@@ -405,39 +665,236 @@ export const useStore = create<DesignStore>((set, get) => ({
 
   groupSelected: () => set((state) => {
     const currentPage = state.pages.find(p => p.id === state.currentPageId);
-    if (!currentPage || state.selectedIds.length === 0) return state;
+        if (!currentPage || state.selectedIds.length < 2) return state;
 
-    const selectedNodes = currentPage.nodes.filter(n => state.selectedIds.includes(n.id));
-    const minX = Math.min(...selectedNodes.map(n => n.x));
-    const minY = Math.min(...selectedNodes.map(n => n.y));
-    const maxX = Math.max(...selectedNodes.map(n => n.x + n.width));
-    const maxY = Math.max(...selectedNodes.map(n => n.y + n.height));
+        const topLevelIds = getTopLevelSelectionIds(currentPage.nodes, state.selectedIds);
+        if (topLevelIds.length < 2) return state;
 
-    const frame = createDefaultNode('frame', minX, minY) as FrameNode;
-    frame.width = maxX - minX;
-    frame.height = maxY - minY;
-    frame.name = 'Group';
+        const bounds = topLevelIds
+            .map((id) => {
+                const node = getNodeById(currentPage.nodes, id);
+                if (!node) return null;
+                const pos = getGlobalPosition(currentPage.nodes, id);
+                return {
+                    node,
+                    x: pos.x,
+                    y: pos.y,
+                    right: pos.x + node.width,
+                    bottom: pos.y + node.height,
+                };
+            })
+            .filter((item): item is { node: SceneNode; x: number; y: number; right: number; bottom: number } => item !== null);
 
-    const groupedNodes = currentPage.nodes.map(n => {
-        if (state.selectedIds.includes(n.id)) {
+        if (bounds.length < 2) return state;
+
+        const minX = Math.min(...bounds.map((item) => item.x));
+        const minY = Math.min(...bounds.map((item) => item.y));
+        const maxX = Math.max(...bounds.map((item) => item.right));
+        const maxY = Math.max(...bounds.map((item) => item.bottom));
+
+        const groupNode = createDefaultNode('group', minX, minY) as FrameNode;
+        groupNode.width = Math.max(20, maxX - minX);
+        groupNode.height = Math.max(20, maxY - minY);
+        groupNode.name = 'Group';
+        groupNode.clipsContent = false;
+
+        const topLevelSet = new Set(topLevelIds);
+        const groupedNodes = currentPage.nodes.map((node) => {
+            if (!topLevelSet.has(node.id)) return node;
+            const globalPos = getGlobalPosition(currentPage.nodes, node.id);
             return {
-                ...n,
-                parentId: frame.id,
-                x: n.x - minX,
-                y: n.y - minY
-            } as SceneNode;
-        }
-        return n;
-    });
+                ...node,
+                parentId: groupNode.id,
+                x: globalPos.x - groupNode.x,
+                y: globalPos.y - groupNode.y,
+            };
+        });
 
-    const newNodes = [...groupedNodes, frame];
+        const newNodes = [...groupedNodes, groupNode];
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
     
     return {
         pages,
-        selectedIds: [frame.id]
+                selectedIds: [groupNode.id]
     };
   }),
+
+    frameSelected: () => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage || state.selectedIds.length === 0) return state;
+
+        const topLevelIds = getTopLevelSelectionIds(currentPage.nodes, state.selectedIds);
+        if (topLevelIds.length === 0) return state;
+
+        const commonParentId = getCommonParentId(currentPage.nodes, topLevelIds);
+        const frameParentId = commonParentId === 'mixed' ? undefined : commonParentId;
+        const keepParentContext = commonParentId !== 'mixed';
+
+        const bounds = topLevelIds
+            .map((id) => {
+                const node = getNodeById(currentPage.nodes, id);
+                if (!node) return null;
+                const pos = keepParentContext
+                    ? { x: node.x, y: node.y }
+                    : getGlobalPosition(currentPage.nodes, id);
+                return {
+                    node,
+                    x: pos.x,
+                    y: pos.y,
+                    right: pos.x + node.width,
+                    bottom: pos.y + node.height,
+                };
+            })
+            .filter((item): item is { node: SceneNode; x: number; y: number; right: number; bottom: number } => item !== null);
+
+        if (bounds.length === 0) return state;
+
+        const minX = Math.min(...bounds.map((item) => item.x));
+        const minY = Math.min(...bounds.map((item) => item.y));
+        const maxX = Math.max(...bounds.map((item) => item.right));
+        const maxY = Math.max(...bounds.map((item) => item.bottom));
+
+        const frameNode = createDefaultNode('frame', minX, minY) as FrameNode;
+        frameNode.name = 'Frame';
+        frameNode.parentId = frameParentId;
+        frameNode.width = Math.max(1, maxX - minX);
+        frameNode.height = Math.max(1, maxY - minY);
+        frameNode.fill = 'transparent';
+        frameNode.fills = [];
+        frameNode.stroke = '#6366F1'; // Give it a visible stroke initially to see it
+        frameNode.strokeWidth = 1;
+        frameNode.clipsContent = false;
+        frameNode.layoutMode = 'none';
+        frameNode.padding = { top: 0, right: 0, bottom: 0, left: 0 };
+        frameNode.gap = 0;
+
+        const topLevelSet = new Set(topLevelIds);
+        const reframedNodes = currentPage.nodes.map((node) => {
+            if (!topLevelSet.has(node.id)) return node;
+            const sourcePos = keepParentContext
+                ? { x: node.x, y: node.y }
+                : getGlobalPosition(currentPage.nodes, node.id);
+            return {
+                ...node,
+                parentId: frameNode.id,
+                x: sourcePos.x - frameNode.x,
+                y: sourcePos.y - frameNode.y,
+            };
+        });
+
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: [...reframedNodes, frameNode] } : page
+        );
+
+        return {
+            pages,
+            selectedIds: [frameNode.id],
+        };
+    }),
+
+    copySelected: () => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage || state.selectedIds.length === 0) return state;
+
+        const topLevelIds = getTopLevelSelectionIds(currentPage.nodes, state.selectedIds);
+        if (topLevelIds.length === 0) return state;
+
+        const copySet = new Set<string>();
+        topLevelIds.forEach((id) => {
+            copySet.add(id);
+            collectDescendantIds(currentPage.nodes, id, copySet);
+        });
+
+        const copiedNodes = deepClone(currentPage.nodes.filter((node) => copySet.has(node.id)));
+        if (copiedNodes.length === 0) return state;
+
+        const copiedSet = new Set(copiedNodes.map((node) => node.id));
+        const rootIds = copiedNodes
+            .filter((node) => !node.parentId || !copiedSet.has(node.parentId))
+            .map((node) => node.id);
+
+        const normalizedNodes = copiedNodes.map((node) => {
+            if (!rootIds.includes(node.id)) return node;
+            const globalPos = getGlobalPosition(currentPage.nodes, node.id);
+            return {
+                ...node,
+                parentId: undefined,
+                x: globalPos.x,
+                y: globalPos.y,
+            };
+        });
+
+        const roots = normalizedNodes.filter((node) => rootIds.includes(node.id));
+        const minX = Math.min(...roots.map((node) => node.x));
+        const minY = Math.min(...roots.map((node) => node.y));
+
+        clipboardSnapshot = {
+            nodes: normalizedNodes,
+            rootIds,
+            minX,
+            minY,
+        };
+
+        return state;
+    }),
+
+    pasteCopied: (x?: number, y?: number) => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage || !clipboardSnapshot) return state;
+
+        const clonedNodes = deepClone(clipboardSnapshot.nodes);
+        const idMap = new Map<string, string>();
+        const remappedNodes = clonedNodes.map((node) => {
+            const newId = uuidv4();
+            idMap.set(node.id, newId);
+            return { ...node, id: newId };
+        });
+
+        const patchedNodes = remappedNodes.map((node) => ({
+            ...node,
+            parentId: node.parentId ? idMap.get(node.parentId) : undefined,
+        }));
+
+        const newRootIds = clipboardSnapshot.rootIds
+            .map((rootId) => idMap.get(rootId))
+            .filter((rootId): rootId is string => typeof rootId === 'string');
+
+        if (newRootIds.length === 0) return state;
+
+        const rootSet = new Set(newRootIds);
+        const rootNodes = patchedNodes.filter((node) => rootSet.has(node.id));
+        if (rootNodes.length === 0) return state;
+
+        const currentMinX = Math.min(...rootNodes.map((node) => node.x));
+        const currentMinY = Math.min(...rootNodes.map((node) => node.y));
+
+        const targetX = typeof x === 'number' ? x : clipboardSnapshot.minX + 24 * (pasteNudgeCount + 1);
+        const targetY = typeof y === 'number' ? y : clipboardSnapshot.minY + 24 * (pasteNudgeCount + 1);
+        const dx = targetX - currentMinX;
+        const dy = targetY - currentMinY;
+
+        const movedNodes = patchedNodes.map((node) => {
+            if (!rootSet.has(node.id)) return node;
+            return {
+                ...node,
+                x: node.x + dx,
+                y: node.y + dy,
+            };
+        });
+
+        pasteNudgeCount += 1;
+
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: [...page.nodes, ...movedNodes] } : page
+        );
+
+        return {
+            pages,
+            selectedIds: toUniqueIds(newRootIds),
+        };
+    }),
+
+    canPaste: () => clipboardSnapshot !== null,
 
   reorderNode: (id, index) => set((state) => {
       const currentPage = state.pages.find(p => p.id === state.currentPageId);
@@ -474,6 +931,18 @@ export const useStore = create<DesignStore>((set, get) => ({
           newParentId = targetNode?.parentId;
           const targetIdx = newNodes.findIndex(n => n.id === targetId);
           newIndex = position === 'before' ? targetIdx : targetIdx + 1;
+      }
+
+      // Guard against circular hierarchy when dropping into descendants.
+      const isDescendant = (ancestorId: string, candidateId: string | undefined): boolean => {
+          if (!candidateId) return false;
+          if (candidateId === ancestorId) return true;
+          const parent = newNodes.find(n => n.id === candidateId)?.parentId;
+          return isDescendant(ancestorId, parent);
+      };
+
+      if (isDescendant(dragId, newParentId)) {
+          return state;
       }
 
       // 1. Remove node
@@ -619,7 +1088,7 @@ export const useStore = create<DesignStore>((set, get) => ({
   }),
 
   // Prototyping Mutation
-  mutateVariable: (id: string, newValue: any) => set((state) => {
+    mutateVariable: (id: string, newValue: unknown) => set((state) => {
       const variables = state.variables.map(v => v.id === id ? { ...v, value: newValue } : v);
       return { variables };
   }),

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Sparkles, Loader2, X, Send, Command, MessageSquare, History, User, Bot, Trash2, Copy, Check } from 'lucide-react';
 import { useStore } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
+import { SceneNode } from '../types';
 
 const SUGGESTED_PROMPTS = [
     "Build a sleek landing page",
@@ -162,7 +163,7 @@ export const NovaAI = () => {
                             <div key={tweak.id} className="bg-[#1A1A1A] border border-[#2A2A2A] rounded-xl p-3 space-y-2 group">
                                 <div className="flex justify-between items-center">
                                     <span className="text-[10px] text-[#A1A1A1] font-bold">{tweak.label}</span>
-                                    {tweak.type === 'slider' && <span className="text-[9px] text-[#555] font-mono">{tweak.value}</span>}
+                                    {tweak.type === 'slider' && <span className="text-[9px] text-[#555] font-mono">{typeof tweak.value === 'number' ? tweak.value : String(tweak.value ?? '')}</span>}
                                 </div>
                                 {tweak.type === 'slider' && (
                                     <input 
@@ -170,11 +171,11 @@ export const NovaAI = () => {
                                         min={tweak.min ?? 0}
                                         max={tweak.max ?? 100}
                                         step={(tweak.max ?? 1) > 1 ? 1 : 0.01}
-                                        value={tweak.value}
+                                        value={typeof tweak.value === 'number' ? tweak.value : 0}
                                         onChange={(e) => {
                                             const val = parseFloat(e.target.value);
                                             const targetId = tweak.targetNodeId === 'Selection' ? selectedIds[0] : tweak.targetNodeId;
-                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as any);
+                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as Partial<SceneNode>);
                                             useStore.setState(s => ({
                                                 aiTweaks: s.aiTweaks.map(at => at.id === tweak.id ? { ...at, value: val } : at)
                                             }));
@@ -185,11 +186,11 @@ export const NovaAI = () => {
                                 {tweak.type === 'color' && (
                                     <input 
                                         type="color"
-                                        value={tweak.value}
+                                        value={typeof tweak.value === 'string' ? tweak.value : '#6366F1'}
                                         onChange={(e) => {
                                             const val = e.target.value;
                                             const targetId = tweak.targetNodeId === 'Selection' ? selectedIds[0] : tweak.targetNodeId;
-                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as any);
+                                            if (targetId) updateNode(targetId, { [tweak.targetProperty]: val } as Partial<SceneNode>);
                                             useStore.setState(s => ({
                                                 aiTweaks: s.aiTweaks.map(at => at.id === tweak.id ? { ...at, value: val } : at)
                                             }));
