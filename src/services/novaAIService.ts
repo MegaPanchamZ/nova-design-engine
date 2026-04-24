@@ -1,7 +1,31 @@
 import { GoogleGenAI } from "@google/genai";
 import { AIMessage, Paint, SceneNode } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+let aiClient: GoogleGenAI | null = null;
+
+const getApiKey = (): string | undefined => {
+  const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  return key && key.trim().length > 0 ? key.trim() : undefined;
+};
+
+const getAIClient = (): GoogleGenAI | null => {
+  if (aiClient) return aiClient;
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+  aiClient = new GoogleGenAI({ apiKey });
+  return aiClient;
+};
+
+const MISSING_API_KEY_RESPONSE = `[MESSAGE]
+Nova AI is disabled because no Gemini API key is configured. Set NEXT_PUBLIC_GEMINI_API_KEY in your app environment to enable chat and image generation.
+[/MESSAGE]
+
+[HTML]
+[/HTML]
+
+[TWEAKS]
+[]
+[/TWEAKS]`;
 
 const toRgba = (color: string, opacity: number): string => {
   const safeOpacity = Math.min(1, Math.max(0, opacity));
@@ -154,6 +178,9 @@ You can target nested fill paths for advanced edits, such as:
 `;
 
 export const generateImage = async (prompt: string): Promise<string> => {
+  const ai = getAIClient();
+  if (!ai) return '';
+
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -176,6 +203,11 @@ export const generateImage = async (prompt: string): Promise<string> => {
 };
 
 export const generateUI = async (prompt: string, history: AIMessage[] = [], contextNodes: SceneNode[] = []): Promise<string> => {
+  const ai = getAIClient();
+  if (!ai) {
+    return MISSING_API_KEY_RESPONSE;
+  }
+
   try {
     const contextHTML = contextNodes.length > 0 ? `\n\nCURRENT DESIGN CONTEXT (HTML):\n${nodesToHTMContext(contextNodes)}` : "";
     
@@ -202,6 +234,6 @@ export const generateUI = async (prompt: string, history: AIMessage[] = [], cont
     return response.text || "";
   } catch (error) {
     console.error("Nova AI Error:", error);
-    throw error;
+    return `[MESSAGE]\nNova AI request failed. Please check your Gemini key and network settings, then try again.\n[/MESSAGE]\n\n[HTML]\n[/HTML]\n\n[TWEAKS]\n[]\n[/TWEAKS]`;
   }
 };
