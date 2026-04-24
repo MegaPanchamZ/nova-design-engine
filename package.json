@@ -1,54 +1,61 @@
 {
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
+  "name": "nova-design-engine",
+  "private": false,
+  "version": "0.1.0",
+  "description": "Installable design engine toolkit with BYO LLM bindings",
+  "license": "MIT",
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "require": "./dist/browser.cjs"
+    },
+    "./parser": {
+      "types": "./dist/parser.d.ts",
+      "import": "./dist/parser.js",
+      "require": "./dist/parser.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "build": "npm run build:core",
+    "build:core": "tsup",
+    "build:adapters": "npm run build --prefix packages/adapter-openai && npm run build --prefix packages/adapter-google-genai",
+    "build:all": "npm run build:core && npm run build:adapters",
+    "prepare": "npm run build:core",
+    "clean": "rimraf dist",
     "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@chenglou/pretext": "^0.0.6",
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
     "@google/genai": "^1.29.0",
-    "@tailwindcss/vite": "^4.1.14",
-    "@types/paper": "^0.11.14",
-    "@types/uuid": "^10.0.0",
-    "@vitejs/plugin-react": "^5.0.4",
-    "canvg": "^4.0.3",
-    "dotenv": "^17.2.3",
-    "express": "^4.21.2",
     "jspdf": "^4.2.1",
-    "konva": "^10.2.5",
-    "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
     "paper": "^0.12.18",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-konva": "^19.2.3",
     "svg2pdf.js": "^2.7.0",
-    "use-image": "^1.1.4",
     "uuid": "^14.0.0",
-    "vite": "^6.2.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "autoprefixer": "^10.4.21",
-    "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
+    "@types/paper": "^0.11.14",
+    "@types/uuid": "^10.0.0",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.3.5",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0",
     "vitest": "^4.1.5"
   }
 }
