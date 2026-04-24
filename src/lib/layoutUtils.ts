@@ -22,6 +22,57 @@ export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { fram
     return fallback;
   };
 
+  const parseGridTracks = (value: number | string | undefined, fallbackCount: number): string[] => {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Array.from({ length: Math.floor(value) }, () => '1fr');
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return Array.from({ length: fallbackCount }, () => '1fr');
+      const parsed = parseInt(trimmed, 10);
+      if (Number.isFinite(parsed) && parsed > 0 && String(parsed) === trimmed) {
+        return Array.from({ length: parsed }, () => '1fr');
+      }
+      const tokens = trimmed.split(/\s+/).filter(Boolean);
+      if (tokens.length > 0) return tokens;
+    }
+    return Array.from({ length: fallbackCount }, () => '1fr');
+  };
+
+  const resolveTrackSizes = (tokens: string[], available: number) => {
+    const parsed = tokens.map((token) => {
+      const normalized = token.toLowerCase();
+      if (normalized.endsWith('fr')) {
+        const weight = Number.parseFloat(normalized.slice(0, -2));
+        return { kind: 'fr' as const, value: Number.isFinite(weight) && weight > 0 ? weight : 1 };
+      }
+      if (normalized.endsWith('%')) {
+        const percent = Number.parseFloat(normalized.slice(0, -1));
+        if (Number.isFinite(percent) && percent > 0) {
+          return { kind: 'px' as const, value: (available * percent) / 100 };
+        }
+      }
+      if (normalized === 'auto') {
+        return { kind: 'fr' as const, value: 1 };
+      }
+      const numeric = Number.parseFloat(normalized);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return { kind: 'px' as const, value: numeric };
+      }
+      return { kind: 'fr' as const, value: 1 };
+    });
+
+    const fixed = parsed.reduce((sum, track) => (track.kind === 'px' ? sum + track.value : sum), 0);
+    const frTotal = parsed.reduce((sum, track) => (track.kind === 'fr' ? sum + track.value : sum), 0);
+    const remaining = Math.max(0, available - fixed);
+
+    return parsed.map((track) => {
+      if (track.kind === 'px') return track.value;
+      if (frTotal <= 0) return 0;
+      return (remaining * track.value) / frTotal;
+    });
+  };
+
   const measureHugText = (child: SceneNode, maxWidth?: number) => {
     if (child.type !== 'text') return;
     const text = child as TextNode;
@@ -77,8 +128,16 @@ export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { fram
     }
   } else if (frame.layoutMode === 'grid') {
     const itemCount = Math.max(1, updatedLayoutChildren.length);
-    const columns = parseGridDimension(frame.gridColumns, Math.ceil(Math.sqrt(itemCount)));
-    const rows = parseGridDimension(frame.gridRows, Math.ceil(itemCount / columns));
+    const fallbackColumns = parseGridDimension(frame.gridColumns, Math.ceil(Math.sqrt(itemCount)));
+    const columnTracks = parseGridTracks(frame.gridColumns, fallbackColumns);
+    const columns = Math.max(1, columnTracks.length);
+
+    const fallbackRows = parseGridDimension(frame.gridRows, Math.ceil(itemCount / columns));
+    const rowTracks = parseGridTracks(frame.gridRows, fallbackRows);
+    const rows = Math.max(1, Math.max(rowTracks.length, Math.ceil(itemCount / columns)));
+    const normalizedRowTracks = rowTracks.length >= rows
+      ? rowTracks
+      : [...rowTracks, ...Array.from({ length: rows - rowTracks.length }, () => '1fr')];
 
     updatedLayoutChildren.forEach(child => {
       if (child.horizontalResizing === 'hug') measureHugText(child);
@@ -95,10 +154,31 @@ export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { fram
       updatedFrame.height = padding.top + padding.bottom + rows * maxChildHeight + Math.max(0, rows - 1) * gap;
     }
 
-    const cellW = Math.max(0, (getInnerWidth() - Math.max(0, columns - 1) * gap) / columns);
-    const cellH = Math.max(0, (getInnerHeight() - Math.max(0, rows - 1) * gap) / rows);
+    const availableGridWidth = Math.max(0, getInnerWidth() - Math.max(0, columns - 1) * gap);
+    const availableGridHeight = Math.max(0, getInnerHeight() - Math.max(0, rows - 1) * gap);
+    const columnWidths = resolveTrackSizes(columnTracks, availableGridWidth);
+    const rowHeights = resolveTrackSizes(normalizedRowTracks, availableGridHeight);
+
+    const columnOffsets: number[] = [];
+    let runningX = padding.left;
+    for (let index = 0; index < columns; index++) {
+      columnOffsets.push(runningX);
+      runningX += (columnWidths[index] || 0) + gap;
+    }
+
+    const rowOffsets: number[] = [];
+    let runningY = padding.top;
+    for (let index = 0; index < rows; index++) {
+      rowOffsets.push(runningY);
+      runningY += (rowHeights[index] || 0) + gap;
+    }
 
     updatedLayoutChildren.forEach((child, index) => {
+      const col = index % columns;
+      const row = Math.floor(index / columns);
+      const cellW = columnWidths[col] || 0;
+      const cellH = rowHeights[row] || 0;
+
       if (child.horizontalResizing === 'fill' || frame.alignItems === 'stretch') child.width = cellW;
       if (child.verticalResizing === 'fill' || frame.alignItems === 'stretch') child.height = cellH;
 
@@ -109,10 +189,14 @@ export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { fram
         child.height = metrics.height;
       }
 
-      const col = index % columns;
-      const row = Math.floor(index / columns);
-      child.x = padding.left + col * (cellW + gap);
-      child.y = padding.top + row * (cellH + gap);
+      child.x = columnOffsets[col] || padding.left;
+      child.y = rowOffsets[row] || padding.top;
+
+      if (frame.alignItems === 'center' && child.horizontalResizing !== 'fill') {
+        child.x += (cellW - child.width) / 2;
+      } else if (frame.alignItems === 'end' && child.horizontalResizing !== 'fill') {
+        child.x += cellW - child.width;
+      }
     });
   }
 

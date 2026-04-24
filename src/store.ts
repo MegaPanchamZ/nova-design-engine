@@ -209,6 +209,77 @@ const getCommonParentId = (nodes: SceneNode[], nodeIds: string[]): string | unde
     return firstParent;
 };
 
+const collectSubtreeIds = (nodes: SceneNode[], rootId: string): Set<string> => {
+    const subtreeIds = new Set<string>([rootId]);
+    let changed = true;
+    while (changed) {
+        changed = false;
+        nodes.forEach((node) => {
+            if (node.parentId && subtreeIds.has(node.parentId) && !subtreeIds.has(node.id)) {
+                subtreeIds.add(node.id);
+                changed = true;
+            }
+        });
+    }
+    return subtreeIds;
+};
+
+const cloneComponentSubtreeAsInstance = (
+    allNodes: SceneNode[],
+    sourceComponent: SceneNode,
+    overrides?: {
+        rootId?: string;
+        rootX?: number;
+        rootY?: number;
+        rootParentId?: string;
+        rootName?: string;
+    }
+): { clonedSubtree: SceneNode[]; rootInstanceId: string } | null => {
+    const sourceSubtreeIds = collectSubtreeIds(allNodes, sourceComponent.id);
+    const sourceSubtree = allNodes.filter((node) => sourceSubtreeIds.has(node.id));
+    if (sourceSubtree.length === 0) return null;
+
+    const idMap = new Map<string, string>();
+    sourceSubtree.forEach((node) => {
+        if (node.id === sourceComponent.id && overrides?.rootId) {
+            idMap.set(node.id, overrides.rootId);
+        } else {
+            idMap.set(node.id, uuidv4());
+        }
+    });
+
+    const rootId = idMap.get(sourceComponent.id);
+    if (!rootId) return null;
+
+    const clonedSubtree = sourceSubtree.map((sourceNode) => {
+        const isRoot = sourceNode.id === sourceComponent.id;
+        const cloneId = idMap.get(sourceNode.id) || uuidv4();
+        const cloneParentId = isRoot
+            ? overrides?.rootParentId ?? sourceComponent.parentId
+            : (sourceNode.parentId ? idMap.get(sourceNode.parentId) : undefined);
+        const cloned = deepClone(sourceNode) as SceneNode;
+
+        const nextNode = {
+            ...cloned,
+            id: cloneId,
+            type: (isRoot ? 'instance' : cloned.type) as SceneNode['type'],
+            parentId: cloneParentId,
+            masterId: sourceNode.id,
+            x: isRoot
+                ? sanitizeCoordinate(overrides?.rootX ?? (cloned.x + 24), cloned.x)
+                : cloned.x,
+            y: isRoot
+                ? sanitizeCoordinate(overrides?.rootY ?? (cloned.y + 24), cloned.y)
+                : cloned.y,
+            name: isRoot ? (overrides?.rootName || `${sourceComponent.name} Instance`) : cloned.name,
+        } as SceneNode;
+
+        return sanitizeNodeGeometry(nextNode, cloned);
+    });
+
+    return { clonedSubtree, rootInstanceId: rootId };
+};
+
 const toUniqueIds = (ids: string[]): string[] => Array.from(new Set(ids));
 
 const parseAiTweaks = (rawTweaks: unknown, selectedIds: string[]): AITweak[] => {
@@ -332,6 +403,7 @@ interface DesignStore extends DesignState {
   setHoveredId: (id: string | null) => void;
   toggleRulers: () => void;
   addGuide: (type: 'horizontal' | 'vertical', position: number) => void;
+    updateGuide: (id: string, position: number) => void;
   removeGuide: (id: string) => void;
   setSnapLines: (lines: SnapLine[]) => void;
   // Page Actions
@@ -347,6 +419,10 @@ interface DesignStore extends DesignState {
   sendAIChat: (message: string) => Promise<void>;
   generateUIFromPrompt: (prompt: string) => Promise<void>;
   groupSelected: () => void;
+    createComponentFromSelection: () => void;
+    createInstanceFromComponent: (componentId?: string) => void;
+    createVariantFromComponent: (componentId?: string) => void;
+    switchInstanceVariant: (instanceId: string, variantComponentId: string) => void;
     frameSelected: () => void;
     copySelected: () => void;
     pasteCopied: (x?: number, y?: number) => void;
@@ -390,6 +466,9 @@ export const useStore = create<DesignStore>((set, get) => ({
   setHoveredId: (hoveredId) => set({ hoveredId }),
   toggleRulers: () => set(s => ({ showRulers: !s.showRulers })),
   addGuide: (type, position) => set(s => ({ guides: [...s.guides, { id: uuidv4(), type, position }] })),
+    updateGuide: (id, position) => set((state) => ({
+        guides: state.guides.map((guide) => guide.id === id ? { ...guide, position } : guide)
+    })),
   removeGuide: (id) => set(s => ({ guides: s.guides.filter(g => g.id !== id) })),
   setSnapLines: (snapLines) => set({ snapLines }),
   
@@ -592,13 +671,12 @@ export const useStore = create<DesignStore>((set, get) => ({
     const currentPage = state.pages.find(p => p.id === state.currentPageId);
     if (!currentPage) return state;
 
-    let newNodes = currentPage.nodes.map((n) => {
-        if (n.id === id) {
-            let updated = { ...n, ...updates } as SceneNode;
-            
+        const applyNodeUpdates = (baseNode: SceneNode, patch: Partial<SceneNode>): SceneNode => {
+            let updated = { ...baseNode, ...patch } as SceneNode;
+
             // Sync legacy fill/stroke updates with multi-paint system, but preserve paint ids.
-            if (updates.fill !== undefined && updates.fills === undefined) {
-                const targetColor = String(updates.fill);
+            if (patch.fill !== undefined && patch.fills === undefined) {
+                const targetColor = String(patch.fill);
                 const nextFills: Paint[] = (updated.fills && updated.fills.length > 0)
                     ? updated.fills.map((paint) => ({ ...paint }))
                     : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: updated.opacity || 1, visible: true }];
@@ -618,8 +696,9 @@ export const useStore = create<DesignStore>((set, get) => ({
 
                 updated.fills = nextFills;
             }
-            if (updates.stroke !== undefined && updates.strokes === undefined) {
-                const targetColor = String(updates.stroke);
+
+            if (patch.stroke !== undefined && patch.strokes === undefined) {
+                const targetColor = String(patch.stroke);
                 const nextStrokes: Paint[] = (updated.strokes && updated.strokes.length > 0)
                     ? updated.strokes.map((paint) => ({ ...paint }))
                     : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true }];
@@ -640,25 +719,24 @@ export const useStore = create<DesignStore>((set, get) => ({
                 updated.strokes = nextStrokes;
             }
 
-            if (updates.fills !== undefined) {
+            if (patch.fills !== undefined) {
                 updated.fills = sanitizePaintCollection(updated.fills, updated.fill || '#D9D9D9');
                 updated.fill = deriveConvenienceColorFromPaints(updated.fills, 'transparent');
             }
 
-            if (updates.strokes !== undefined) {
+            if (patch.strokes !== undefined) {
                 updated.strokes = sanitizePaintCollection(updated.strokes, updated.stroke || '#000000');
                 updated.stroke = deriveConvenienceColorFromPaints(updated.strokes, updated.stroke || '#000000');
             }
 
-            // Text sync logic
-            const textUpdates = updates as Partial<TextNode>;
+            const textUpdates = patch as Partial<TextNode>;
             if (textUpdates.text !== undefined && updated.isAutoName) {
                 updated.name = textUpdates.text || 'Text';
             }
 
-            updated = sanitizeNodeGeometry(updated, n);
-            if (updates.name !== undefined) {
-                if (updates.name.trim() === '') {
+            updated = sanitizeNodeGeometry(updated, baseNode);
+            if (patch.name !== undefined && typeof patch.name === 'string') {
+                if (patch.name.trim() === '') {
                     updated.isAutoName = true;
                     if (updated.type === 'text') updated.name = updated.text || 'Text';
                 } else {
@@ -666,21 +744,44 @@ export const useStore = create<DesignStore>((set, get) => ({
                 }
             }
 
-            // Self-resize HUG text nodes
             if (updated.type === 'text') {
                 const textNode = updated as TextNode;
-                // Important: Use current width as maxWidth ONLY if it's fixed/fill.
-                // If it's HUG, we want the natural width (no wrapping unless there are hard breaks).
                 const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill') ? textNode.width : undefined;
                 const metrics = measureText(textNode.text, textNode.fontSize, textNode.fontFamily, maxWidth, textNode.lineHeight);
-                
+
                 if (textNode.horizontalResizing === 'hug') updated.width = metrics.width;
                 if (textNode.verticalResizing === 'hug') updated.height = metrics.height;
             }
+
             return updated;
-        }
-        return n;
+        };
+
+    let newNodes = currentPage.nodes.map((n) => {
+            if (n.id !== id) return n;
+            return applyNodeUpdates(n, updates);
     });
+
+        const sourceNode = newNodes.find((n) => n.id === id);
+        const sourceIsMasterNode = (() => {
+            if (!sourceNode || sourceNode.type === 'instance') return false;
+            let cursor: SceneNode | undefined = sourceNode;
+            while (cursor) {
+                if (cursor.type === 'component') return true;
+                cursor = getNodeById(newNodes, cursor.parentId);
+            }
+            return false;
+        })();
+
+        const propagationPatch = Object.fromEntries(
+            Object.entries(updates).filter(([key]) => !['id', 'type', 'parentId', 'masterId', 'x', 'y', 'name'].includes(key))
+        ) as Partial<SceneNode>;
+
+        if (sourceIsMasterNode && Object.keys(propagationPatch).length > 0) {
+            newNodes = newNodes.map((nodeEntry) => {
+                if (nodeEntry.masterId !== id) return nodeEntry;
+                return applyNodeUpdates(nodeEntry, propagationPatch);
+            });
+        }
 
     // Handle spatial reordering for Auto Layout
     const node = newNodes.find(n => n.id === id);
@@ -834,6 +935,187 @@ export const useStore = create<DesignStore>((set, get) => ({
                 selectedIds: [groupNode.id]
     };
   }),
+
+    createComponentFromSelection: () => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage || state.selectedIds.length === 0) return state;
+
+        const topLevelIds = getTopLevelSelectionIds(currentPage.nodes, state.selectedIds);
+        if (topLevelIds.length === 0) return state;
+
+        const commonParent = getCommonParentId(currentPage.nodes, topLevelIds);
+        if (commonParent === 'mixed') return state;
+
+        const selectedTopLevelNodes = topLevelIds
+            .map((nodeId) => getNodeById(currentPage.nodes, nodeId))
+            .filter((node): node is SceneNode => Boolean(node));
+        if (selectedTopLevelNodes.length === 0) return state;
+
+        const minX = Math.min(...selectedTopLevelNodes.map((node) => node.x));
+        const minY = Math.min(...selectedTopLevelNodes.map((node) => node.y));
+        const maxX = Math.max(...selectedTopLevelNodes.map((node) => node.x + node.width));
+        const maxY = Math.max(...selectedTopLevelNodes.map((node) => node.y + node.height));
+
+        const componentNode = createDefaultNode('component', minX, minY) as FrameNode;
+        componentNode.parentId = commonParent;
+        componentNode.width = sanitizeSize(maxX - minX, componentNode.width);
+        componentNode.height = sanitizeSize(maxY - minY, componentNode.height);
+        componentNode.name = 'Component';
+
+        const selectedSet = new Set(topLevelIds);
+        const adjustedNodes = currentPage.nodes.map((node) => {
+            if (!selectedSet.has(node.id)) return node;
+            return {
+                ...node,
+                parentId: componentNode.id,
+                x: sanitizeCoordinate(node.x - minX, node.x),
+                y: sanitizeCoordinate(node.y - minY, node.y),
+            };
+        });
+
+        const insertAt = Math.max(0, currentPage.nodes.findIndex((node) => selectedSet.has(node.id)));
+        const nextNodes = [...adjustedNodes];
+        nextNodes.splice(insertAt, 0, componentNode);
+
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
+        );
+        return { pages, selectedIds: [componentNode.id] };
+    }),
+
+    createInstanceFromComponent: (componentId) => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage) return state;
+
+        const sourceComponent = componentId
+            ? currentPage.nodes.find((node) => node.id === componentId && node.type === 'component')
+            : currentPage.nodes.find((node) => state.selectedIds.includes(node.id) && node.type === 'component');
+        if (!sourceComponent || sourceComponent.type !== 'component') return state;
+
+        const result = cloneComponentSubtreeAsInstance(currentPage.nodes, sourceComponent);
+        if (!result) return state;
+        const sourceSubtreeIds = collectSubtreeIds(currentPage.nodes, sourceComponent.id);
+        const subtreeIndexes = currentPage.nodes
+            .map((node, index) => (sourceSubtreeIds.has(node.id) ? index : -1))
+            .filter((index) => index >= 0);
+        const insertAt = subtreeIndexes.length > 0 ? Math.max(...subtreeIndexes) + 1 : currentPage.nodes.length;
+
+        const nextNodes = [...currentPage.nodes];
+        nextNodes.splice(insertAt, 0, ...result.clonedSubtree);
+
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
+        );
+        return { pages, selectedIds: [result.rootInstanceId] };
+    }),
+
+    createVariantFromComponent: (componentId) => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage) return state;
+
+        const sourceComponent = componentId
+            ? currentPage.nodes.find((node) => node.id === componentId && node.type === 'component')
+            : currentPage.nodes.find((node) => state.selectedIds.includes(node.id) && node.type === 'component');
+        if (!sourceComponent || sourceComponent.type !== 'component') return state;
+
+        const existingGroupId = sourceComponent.variantGroupId;
+        const variantGroupId = existingGroupId || uuidv4();
+
+        const componentsInGroup = currentPage.nodes.filter(
+            (node) => node.type === 'component' && node.variantGroupId === variantGroupId
+        );
+        const variantNumber = Math.max(2, componentsInGroup.length + 1);
+
+        const sourceSubtreeIds = collectSubtreeIds(currentPage.nodes, sourceComponent.id);
+        const sourceSubtree = currentPage.nodes.filter((node) => sourceSubtreeIds.has(node.id));
+        if (sourceSubtree.length === 0) return state;
+
+        const idMap = new Map<string, string>();
+        sourceSubtree.forEach((node) => idMap.set(node.id, uuidv4()));
+        const newRootId = idMap.get(sourceComponent.id);
+        if (!newRootId) return state;
+
+        const clonedVariantSubtree = sourceSubtree.map((sourceNode) => {
+            const isRoot = sourceNode.id === sourceComponent.id;
+            const cloneId = idMap.get(sourceNode.id) || uuidv4();
+            const cloneParentId = isRoot
+                ? sourceComponent.parentId
+                : (sourceNode.parentId ? idMap.get(sourceNode.parentId) : undefined);
+            const clone = deepClone(sourceNode) as SceneNode;
+
+            const nextNode = {
+                ...clone,
+                id: cloneId,
+                parentId: cloneParentId,
+                masterId: undefined,
+                x: isRoot ? sanitizeCoordinate(clone.x + 40, clone.x) : clone.x,
+                y: isRoot ? sanitizeCoordinate(clone.y + 40, clone.y) : clone.y,
+                variantGroupId: variantGroupId,
+                variantName: isRoot ? `Variant ${variantNumber}` : undefined,
+                name: isRoot ? `${sourceComponent.name} / Variant ${variantNumber}` : clone.name,
+            } as SceneNode;
+
+            return sanitizeNodeGeometry(nextNode, clone);
+        });
+
+        const withUpdatedSource = currentPage.nodes.map((node) => {
+            if (node.id !== sourceComponent.id) return node;
+            return {
+                ...node,
+                variantGroupId,
+                variantName: node.variantName || 'Variant 1',
+            };
+        });
+
+        const sourceIndexes = currentPage.nodes
+            .map((node, index) => (sourceSubtreeIds.has(node.id) ? index : -1))
+            .filter((index) => index >= 0);
+        const insertAt = sourceIndexes.length > 0 ? Math.max(...sourceIndexes) + 1 : withUpdatedSource.length;
+
+        const nextNodes = [...withUpdatedSource];
+        nextNodes.splice(insertAt, 0, ...clonedVariantSubtree);
+
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
+        );
+        return { pages, selectedIds: [newRootId] };
+    }),
+
+    switchInstanceVariant: (instanceId, variantComponentId) => set((state) => {
+        const currentPage = state.pages.find((page) => page.id === state.currentPageId);
+        if (!currentPage) return state;
+
+        const instanceNode = currentPage.nodes.find((node) => node.id === instanceId && node.type === 'instance');
+        const targetVariant = currentPage.nodes.find((node) => node.id === variantComponentId && node.type === 'component');
+        if (!instanceNode || !targetVariant) return state;
+
+        const instanceMaster = instanceNode.masterId
+            ? currentPage.nodes.find((node) => node.id === instanceNode.masterId && node.type === 'component')
+            : undefined;
+        if (!instanceMaster) return state;
+
+        if (!instanceMaster.variantGroupId || instanceMaster.variantGroupId !== targetVariant.variantGroupId) {
+            return state;
+        }
+
+        const oldInstanceSubtreeIds = collectSubtreeIds(currentPage.nodes, instanceNode.id);
+        const filteredNodes = currentPage.nodes.filter((node) => !oldInstanceSubtreeIds.has(node.id));
+
+        const rebuilt = cloneComponentSubtreeAsInstance(filteredNodes, targetVariant, {
+            rootId: instanceNode.id,
+            rootX: instanceNode.x,
+            rootY: instanceNode.y,
+            rootParentId: instanceNode.parentId,
+            rootName: instanceNode.name,
+        });
+        if (!rebuilt) return state;
+
+        const nextNodes = [...filteredNodes, ...rebuilt.clonedSubtree];
+        const pages = state.pages.map((page) =>
+            page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
+        );
+        return { pages, selectedIds: [instanceNode.id] };
+    }),
 
     frameSelected: () => set((state) => {
         const currentPage = state.pages.find((page) => page.id === state.currentPageId);

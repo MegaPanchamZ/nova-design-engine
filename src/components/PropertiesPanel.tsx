@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Settings2, Type, Move, Palette, Combine, Scissors, BoxSelect, Layers, AlignVerticalSpaceAround, AlignHorizontalSpaceAround, ChevronDown, Database, Minus, MousePointer2, Square, AlignLeft, AlignCenter as AlignCenterHorizontal, AlignRight, AlignStartVertical as AlignTop, AlignCenterVertical, AlignEndVertical as AlignBottom, ArrowLeftRight, ArrowUpDown, RotateCw, Maximize2, Monitor, Plus, Eye, EyeOff, Trash2, GripVertical } from 'lucide-react';
+import { Settings2, Type, Move, Palette, Combine, Scissors, BoxSelect, Layers, AlignVerticalSpaceAround, AlignHorizontalSpaceAround, ChevronDown, Database, Minus, MousePointer2, Square, AlignLeft, AlignCenter as AlignCenterHorizontal, AlignRight, AlignStartVertical as AlignTop, AlignCenterVertical, AlignEndVertical as AlignBottom, ArrowLeftRight, ArrowUpDown, RotateCw, Maximize2, Monitor, Plus, Eye, EyeOff, Trash2, GripVertical, Component as ComponentIcon, Diamond } from 'lucide-react';
 import { useStore } from '../store';
 import { Effect, FrameNode, Interaction, Paint, PathNode, SceneNode, TextNode, createDefaultNode } from '../types';
 import { performBooleanOperation } from '../lib/boolean';
@@ -99,7 +99,7 @@ const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: { size: number
 );
 
 export const PropertiesPanel = () => {
-    const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected } = useStore();
+    const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected, createComponentFromSelection, createInstanceFromComponent, createVariantFromComponent, switchInstanceVariant } = useStore();
   const [expandedPadding, setExpandedPadding] = useState(false);
   const [expandedRadius, setExpandedRadius] = useState(false);
     const [exportScale, setExportScale] = useState('1x');
@@ -113,6 +113,15 @@ export const PropertiesPanel = () => {
   const nodes = currentPage?.nodes || [];
   const selectedNodes = nodes.filter((n) => selectedIds.includes(n.id));
   const selectedNode = selectedNodes[0];
+    const selectedComponentNode = selectedNode?.type === 'component' ? (selectedNode as FrameNode) : null;
+    const selectedInstanceNode = selectedNode?.type === 'instance' ? (selectedNode as FrameNode) : null;
+    const selectedInstanceMaster = selectedInstanceNode?.masterId
+        ? nodes.find((node) => node.id === selectedInstanceNode.masterId && node.type === 'component') as FrameNode | undefined
+        : undefined;
+    const activeVariantGroupId = selectedComponentNode?.variantGroupId || selectedInstanceMaster?.variantGroupId;
+    const variantOptions = activeVariantGroupId
+        ? nodes.filter((node) => node.type === 'component' && (node as FrameNode).variantGroupId === activeVariantGroupId) as FrameNode[]
+        : [];
     const selectedFrameNode = selectedNode && ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type) ? (selectedNode as FrameNode) : null;
     const selectedTextNode = selectedNode?.type === 'text' ? (selectedNode as TextNode) : null;
 
@@ -180,6 +189,62 @@ export const PropertiesPanel = () => {
                 updateNode(id, { [key]: value } as Partial<SceneNode>);
     });
   };
+
+    const updateVariableBinding = (bindingKey: 'fill' | 'stroke' | 'opacity' | 'text', variableId: string) => {
+        const currentBindings = selectedNode.variableBindings || {};
+        const nextBindings = { ...currentBindings };
+        if (!variableId) {
+            delete nextBindings[bindingKey];
+        } else {
+            nextBindings[bindingKey] = variableId;
+        }
+        handleChange('variableBindings', nextBindings);
+    };
+
+    const updateInteractions = (next: Interaction[]) => {
+        handleChange('interactions', next);
+    };
+
+    const updateInteraction = (interactionId: string, patch: Partial<Interaction>) => {
+        const next = (selectedNode?.interactions || []).map((interaction) =>
+            interaction.id === interactionId ? { ...interaction, ...patch } : interaction
+        );
+        updateInteractions(next);
+    };
+
+    const updateInteractionAction = (
+        interactionId: string,
+        actionIndex: number,
+        patch: Partial<Interaction['actions'][number]>
+    ) => {
+        const next = (selectedNode?.interactions || []).map((interaction) => {
+            if (interaction.id !== interactionId) return interaction;
+            const actions = interaction.actions.map((action, index) =>
+                index === actionIndex ? { ...action, ...patch } : action
+            );
+            return { ...interaction, actions };
+        });
+        updateInteractions(next);
+    };
+
+    const removeInteractionAction = (interactionId: string, actionIndex: number) => {
+        const next = (selectedNode?.interactions || []).map((interaction) => {
+            if (interaction.id !== interactionId) return interaction;
+            return { ...interaction, actions: interaction.actions.filter((_, index) => index !== actionIndex) };
+        });
+        updateInteractions(next);
+    };
+
+    const addInteractionAction = (interactionId: string) => {
+        const next = (selectedNode?.interactions || []).map((interaction) => {
+            if (interaction.id !== interactionId) return interaction;
+            return {
+                ...interaction,
+                actions: [...interaction.actions, { type: 'setVariable' as const, targetId: variables[0]?.id, value: 0 }],
+            };
+        });
+        updateInteractions(next);
+    };
 
     const applySelectedFills = (nextFills: Paint[]) => {
         const lastSolid = [...nextFills].reverse().find((paint) => paint.type === 'solid');
@@ -375,6 +440,60 @@ export const PropertiesPanel = () => {
                 >
                     <Combine size={14} />
                 </button>
+                {selectedNodes.length > 1 && (
+                    <>
+                        <button
+                            onClick={() => handleBoolean('intersect')}
+                            title="Boolean Intersect"
+                            className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                        >
+                            <Minus size={14} />
+                        </button>
+                        <button
+                            onClick={() => handleBoolean('exclude')}
+                            title="Boolean Exclude"
+                            className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                        >
+                            <Plus size={14} />
+                        </button>
+                    </>
+                )}
+                {selectedNodes.length >= 1 && (
+                    <button
+                        onClick={() => {
+                            createComponentFromSelection();
+                            pushHistory();
+                        }}
+                        title="Create Component"
+                        className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                    >
+                        <ComponentIcon size={14} />
+                    </button>
+                )}
+                {selectedNodes.length === 1 && selectedNode.type === 'component' && (
+                    <button
+                        onClick={() => {
+                            createInstanceFromComponent(selectedNode.id);
+                            pushHistory();
+                        }}
+                        title="Create Instance"
+                        className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                    >
+                        <Diamond size={14} />
+                    </button>
+                )}
+                {selectedNodes.length === 1 && selectedNode.type === 'component' && (
+                    <button
+                        onClick={() => {
+                            createVariantFromComponent(selectedNode.id);
+                            pushHistory();
+                        }}
+                        title="Create Variant"
+                        className="p-1.5 text-[#888] hover:text-[#EDEDED] hover:bg-[#2C2C2C] rounded-sm transition-all"
+                    >
+                        <Plus size={14} />
+                    </button>
+                )}
             </div>
         </div>
 
@@ -424,7 +543,18 @@ export const PropertiesPanel = () => {
                     {selectedNode.interactions?.map((it, idx) => (
                       <div key={it.id} className="bg-[#0A0A0A] p-3 rounded-lg border border-[#2A2A2A] space-y-3">
                         <div className="flex justify-between items-center">
-                           <span className="text-[10px] text-indigo-400 font-bold uppercase">{it.trigger}</span>
+                                                     <select
+                                                        value={it.trigger}
+                                                        onChange={(e) => {
+                                                                updateInteraction(it.id, { trigger: e.target.value as Interaction['trigger'] });
+                                                                pushHistory();
+                                                        }}
+                                                        className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-indigo-300 font-bold uppercase outline-none"
+                                                     >
+                                                        <option value="onClick">onClick</option>
+                                                        <option value="onHover">onHover</option>
+                                                        <option value="onDrag">onDrag</option>
+                                                     </select>
                            <button 
                             onClick={() => {
                                 const next = (selectedNode.interactions || []).filter(i => i.id !== it.id);
@@ -436,14 +566,180 @@ export const PropertiesPanel = () => {
                             Remove
                            </button>
                         </div>
+
+                        <div className="grid grid-cols-3 gap-2">
+                            <select
+                                value={it.condition?.variableId || ''}
+                                onChange={(e) => {
+                                    const variableId = e.target.value;
+                                    if (!variableId) {
+                                        updateInteraction(it.id, { condition: undefined });
+                                        pushHistory();
+                                        return;
+                                    }
+                                    updateInteraction(it.id, {
+                                        condition: {
+                                            variableId,
+                                            operator: it.condition?.operator || '==',
+                                            value: it.condition?.value ?? '',
+                                        },
+                                    });
+                                    pushHistory();
+                                }}
+                                className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                            >
+                                <option value="">No condition</option>
+                                {variables.map((variable) => (
+                                    <option key={variable.id} value={variable.id}>
+                                        {variable.name}
+                                    </option>
+                                ))}
+                            </select>
+                            <select
+                                value={it.condition?.operator || '=='}
+                                disabled={!it.condition}
+                                onChange={(e) => {
+                                    if (!it.condition) return;
+                                    updateInteraction(it.id, {
+                                        condition: {
+                                            ...it.condition,
+                                            operator: e.target.value as NonNullable<Interaction['condition']>['operator'],
+                                        },
+                                    });
+                                    pushHistory();
+                                }}
+                                className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none disabled:opacity-40"
+                            >
+                                <option value="==">==</option>
+                                <option value="!=">!=</option>
+                                <option value=">">&gt;</option>
+                                <option value="<">&lt;</option>
+                                <option value=">=">&gt;=</option>
+                                <option value="<=">&lt;=</option>
+                            </select>
+                            <InputField
+                                value={String(it.condition?.value ?? '')}
+                                disabled={!it.condition}
+                                onChange={(nextValue) => {
+                                    if (!it.condition) return;
+                                    updateInteraction(it.id, {
+                                        condition: {
+                                            ...it.condition,
+                                            value: nextValue,
+                                        },
+                                    });
+                                }}
+                                onBlur={handleBlur}
+                            />
+                        </div>
+
                         {it.actions.map((action, aidx) => (
-                          <div key={aidx} className="flex flex-col gap-1">
-                             <span className="text-[8px] text-[#555] uppercase font-black tracking-tighter">Action</span>
-                             <div className="text-[10px] text-[#EDEDED] font-mono bg-[#141414] px-2 py-1 rounded">
-                                                             {action.type} {'->'} {String(action.value ?? '')}
+                          <div key={aidx} className="flex flex-col gap-2 border border-[#202020] rounded-md p-2">
+                             <div className="flex items-center justify-between">
+                                <span className="text-[8px] text-[#555] uppercase font-black tracking-tighter">Action {aidx + 1}</span>
+                                <button
+                                    onClick={() => {
+                                        removeInteractionAction(it.id, aidx);
+                                        pushHistory();
+                                    }}
+                                    className="text-[9px] text-red-400/70 hover:text-red-400"
+                                >
+                                    Remove
+                                </button>
                              </div>
+                             <select
+                                value={action.type}
+                                onChange={(e) => {
+                                    const nextType = e.target.value as Interaction['actions'][number]['type'];
+                                    if (nextType === 'navigate') {
+                                      updateInteractionAction(it.id, aidx, { type: nextType, targetId: pages[0]?.id, value: undefined });
+                                    } else if (nextType === 'toggleVisibility') {
+                                      updateInteractionAction(it.id, aidx, { type: nextType, targetId: nodes[0]?.id, value: true });
+                                    } else {
+                                      updateInteractionAction(it.id, aidx, { type: nextType, targetId: variables[0]?.id, value: 0 });
+                                    }
+                                    pushHistory();
+                                }}
+                                className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                             >
+                                <option value="navigate">navigate</option>
+                                <option value="setVariable">setVariable</option>
+                                <option value="toggleVisibility">toggleVisibility</option>
+                             </select>
+                             {action.type === 'navigate' && (
+                                <select
+                                    value={action.targetId || ''}
+                                    onChange={(e) => {
+                                      updateInteractionAction(it.id, aidx, { targetId: e.target.value });
+                                      pushHistory();
+                                    }}
+                                    className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                >
+                                    {pages.map((page) => (
+                                      <option key={page.id} value={page.id}>{page.name}</option>
+                                    ))}
+                                </select>
+                             )}
+                             {action.type === 'setVariable' && (
+                                <div className="grid grid-cols-2 gap-2">
+                                    <select
+                                        value={action.targetId || variables[0]?.id || ''}
+                                        onChange={(e) => {
+                                          updateInteractionAction(it.id, aidx, { targetId: e.target.value });
+                                          pushHistory();
+                                        }}
+                                        className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                    >
+                                        {variables.map((variable) => (
+                                          <option key={variable.id} value={variable.id}>{variable.name}</option>
+                                        ))}
+                                    </select>
+                                    <InputField
+                                        value={String(action.value ?? '')}
+                                        onChange={(nextValue) => updateInteractionAction(it.id, aidx, { value: nextValue })}
+                                        onBlur={handleBlur}
+                                    />
+                                </div>
+                             )}
+                             {action.type === 'toggleVisibility' && (
+                                <div className="grid grid-cols-2 gap-2">
+                                    <select
+                                        value={action.targetId || nodes[0]?.id || ''}
+                                        onChange={(e) => {
+                                          updateInteractionAction(it.id, aidx, { targetId: e.target.value });
+                                          pushHistory();
+                                        }}
+                                        className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                    >
+                                        {nodes.map((node) => (
+                                          <option key={node.id} value={node.id}>{node.name}</option>
+                                        ))}
+                                    </select>
+                                    <select
+                                        value={String(action.value ?? true)}
+                                        onChange={(e) => {
+                                          updateInteractionAction(it.id, aidx, { value: e.target.value === 'true' });
+                                          pushHistory();
+                                        }}
+                                        className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                    >
+                                        <option value="true">Show</option>
+                                        <option value="false">Hide</option>
+                                    </select>
+                                </div>
+                             )}
                           </div>
                         ))}
+
+                        <button
+                          onClick={() => {
+                            addInteractionAction(it.id);
+                            pushHistory();
+                          }}
+                          className="w-full py-1.5 border border-dashed border-[#2A2A2A] text-[9px] text-[#666] uppercase font-bold hover:text-indigo-300 hover:border-indigo-500/50 rounded"
+                        >
+                          + Add Action
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -453,7 +749,7 @@ export const PropertiesPanel = () => {
                       const newInteraction: Interaction = {
                         id: uuidv4(),
                         trigger: 'onClick',
-                        actions: [{ type: 'setVariable', value: 10 }]
+                                                actions: [{ type: 'setVariable', targetId: variables[0]?.id, value: 10 }]
                       };
                       handleChange('interactions', [...(selectedNode.interactions || []), newInteraction]);
                                             pushHistory();
@@ -473,6 +769,92 @@ export const PropertiesPanel = () => {
             </div>
         ) : (
             <>
+        {selectedNode.type === 'instance' && variantOptions.length > 0 && (
+            <div className="px-4 py-3 border-b border-[#2A2A2A] space-y-2">
+                <div className="text-[10px] uppercase tracking-widest text-[#666] font-black">Variant</div>
+                <select
+                    value={selectedInstanceNode?.masterId || ''}
+                    onChange={(e) => {
+                        switchInstanceVariant(selectedNode.id, e.target.value);
+                        pushHistory();
+                    }}
+                    className="w-full h-8 bg-[#2C2C2C] border border-[#3A3A3A] rounded-sm px-2 text-[11px] text-[#EDEDED] outline-none focus:border-indigo-500/50"
+                >
+                    {variantOptions.map((variant) => (
+                        <option key={variant.id} value={variant.id}>
+                            {variant.variantName || variant.name}
+                        </option>
+                    ))}
+                </select>
+            </div>
+        )}
+
+        {variables.length > 0 && (
+            <div className="px-4 py-3 border-b border-[#2A2A2A] space-y-2">
+                <div className="text-[10px] uppercase tracking-widest text-[#666] font-black">Variable Bindings</div>
+                <div className="grid grid-cols-2 gap-2">
+                    <select
+                        value={selectedNode.variableBindings?.fill || ''}
+                        onChange={(e) => {
+                            updateVariableBinding('fill', e.target.value);
+                            pushHistory();
+                        }}
+                        className="h-7 bg-[#2C2C2C] border border-[#3A3A3A] rounded-sm px-2 text-[10px] text-[#EDEDED] outline-none"
+                    >
+                        <option value="">Fill: none</option>
+                        {variables.filter((variable) => variable.type === 'color').map((variable) => (
+                            <option key={variable.id} value={variable.id}>Fill: {variable.name}</option>
+                        ))}
+                    </select>
+                    <select
+                        value={selectedNode.variableBindings?.stroke || ''}
+                        onChange={(e) => {
+                            updateVariableBinding('stroke', e.target.value);
+                            pushHistory();
+                        }}
+                        className="h-7 bg-[#2C2C2C] border border-[#3A3A3A] rounded-sm px-2 text-[10px] text-[#EDEDED] outline-none"
+                    >
+                        <option value="">Stroke: none</option>
+                        {variables.filter((variable) => variable.type === 'color').map((variable) => (
+                            <option key={variable.id} value={variable.id}>Stroke: {variable.name}</option>
+                        ))}
+                    </select>
+                    <select
+                        value={selectedNode.variableBindings?.opacity || ''}
+                        onChange={(e) => {
+                            updateVariableBinding('opacity', e.target.value);
+                            pushHistory();
+                        }}
+                        className="h-7 bg-[#2C2C2C] border border-[#3A3A3A] rounded-sm px-2 text-[10px] text-[#EDEDED] outline-none"
+                    >
+                        <option value="">Opacity: none</option>
+                        {variables.filter((variable) => variable.type === 'number').map((variable) => (
+                            <option key={variable.id} value={variable.id}>Opacity: {variable.name}</option>
+                        ))}
+                    </select>
+                    {selectedNode.type === 'text' ? (
+                        <select
+                            value={selectedNode.variableBindings?.text || ''}
+                            onChange={(e) => {
+                                updateVariableBinding('text', e.target.value);
+                                pushHistory();
+                            }}
+                            className="h-7 bg-[#2C2C2C] border border-[#3A3A3A] rounded-sm px-2 text-[10px] text-[#EDEDED] outline-none"
+                        >
+                            <option value="">Text: none</option>
+                            {variables.filter((variable) => variable.type === 'string').map((variable) => (
+                                <option key={variable.id} value={variable.id}>Text: {variable.name}</option>
+                            ))}
+                        </select>
+                    ) : (
+                        <div className="h-7 rounded-sm border border-[#2A2A2A] bg-[#171717] text-[9px] text-[#666] flex items-center justify-center uppercase tracking-wider">
+                            Text binding (text nodes only)
+                        </div>
+                    )}
+                </div>
+            </div>
+        )}
+
         {/* Alignment & Distribution Bar */}
         <div id="alignment-controls" className="grid grid-cols-6 border-b border-[#2A2A2A] h-10 divide-x divide-[#2A2A2A]">
             {[
@@ -778,13 +1160,37 @@ export const PropertiesPanel = () => {
                         <div className="grid grid-cols-2 gap-2">
                             <InputField 
                                 value={(selectedNode as FrameNode).gridColumns || 2}
-                                onChange={(v) => handleChange('gridColumns', Math.max(1, parseInt(v) || 1))}
+                                onChange={(v) => {
+                                    const trimmed = v.trim();
+                                    if (!trimmed) {
+                                        handleChange('gridColumns', 1);
+                                        return;
+                                    }
+                                    const numeric = Number.parseInt(trimmed, 10);
+                                    if (Number.isFinite(numeric) && String(numeric) === trimmed) {
+                                        handleChange('gridColumns', Math.max(1, numeric));
+                                    } else {
+                                        handleChange('gridColumns', trimmed);
+                                    }
+                                }}
                                 onBlur={handleBlur}
                                 prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Cols</span>}
                             />
                             <InputField 
                                 value={(selectedNode as FrameNode).gridRows || 2}
-                                onChange={(v) => handleChange('gridRows', Math.max(1, parseInt(v) || 1))}
+                                onChange={(v) => {
+                                    const trimmed = v.trim();
+                                    if (!trimmed) {
+                                        handleChange('gridRows', 1);
+                                        return;
+                                    }
+                                    const numeric = Number.parseInt(trimmed, 10);
+                                    if (Number.isFinite(numeric) && String(numeric) === trimmed) {
+                                        handleChange('gridRows', Math.max(1, numeric));
+                                    } else {
+                                        handleChange('gridRows', trimmed);
+                                    }
+                                }}
                                 onBlur={handleBlur}
                                 prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Rows</span>}
                             />

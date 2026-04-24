@@ -59,6 +59,8 @@ export interface BaseNode {
   type: NodeType;
   parentId?: string;
   masterId?: string; // For Instances to link to Main Component
+  variantGroupId?: string;
+  variantName?: string;
   name: string;
   x: number;
   y: number;
@@ -97,6 +99,12 @@ export interface BaseNode {
   effects?: Effect[];
   // Interactions
   interactions?: Interaction[];
+  variableBindings?: {
+    fill?: string;
+    stroke?: string;
+    opacity?: string;
+    text?: string;
+  };
 }
 
 export interface FrameNode extends BaseNode {
@@ -267,6 +275,7 @@ export const createDefaultNode = (type: NodeType, x: number, y: number, id?: str
     strokes: [],
     effects: [],
     interactions: [],
+    variableBindings: {},
   };
 
   switch (type) {

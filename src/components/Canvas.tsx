@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import { useStore } from '../store';
-import { createDefaultNode, Effect, ImageNode, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
+import { createDefaultNode, Effect, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
 import Konva from 'konva';
 import { measureText } from '../lib/measureText';
 import { getSuperellipsePath } from '../lib/geometry';
@@ -153,7 +153,7 @@ export const Canvas = () => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
-    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste
+    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables
   } = useStore();
   
   const currentPage = pages.find(p => p.id === currentPageId);
@@ -179,6 +179,7 @@ export const Canvas = () => {
   const [isPenDragging, setIsPenDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [selectedPathAnchor, setSelectedPathAnchor] = useState<{ nodeId: string; index: number } | null>(null);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
@@ -207,8 +208,86 @@ export const Canvas = () => {
         if (e.key === '.' || e.key === 'Decimal') {
             zoomToFitSelected();
         }
+
+      const arrowDeltaMap: Record<string, { x: number; y: number }> = {
+        ArrowUp: { x: 0, y: -1 },
+        ArrowDown: { x: 0, y: 1 },
+        ArrowLeft: { x: -1, y: 0 },
+        ArrowRight: { x: 1, y: 0 },
+      };
+      const arrowDelta = arrowDeltaMap[e.key];
+      if (arrowDelta && mode !== 'prototype' && !editingId && selectedIds.length > 0) {
+        e.preventDefault();
+
+        const step = e.shiftKey ? 10 : 1;
+        const dx = arrowDelta.x * step;
+        const dy = arrowDelta.y * step;
+        const selectedSet = new Set(selectedIds);
+        const topLevelSelection = nodes.filter((node) => {
+          if (!selectedSet.has(node.id)) return false;
+          let parentId = node.parentId;
+          while (parentId) {
+            if (selectedSet.has(parentId)) return false;
+            parentId = nodes.find((entry) => entry.id === parentId)?.parentId;
+          }
+          return true;
+        });
+
+        if (topLevelSelection.length === 0) return;
+
+        if (topLevelSelection.length === 1) {
+          const target = topLevelSelection[0];
+          const currentGlobal = getGlobalPosition(target.id);
+          const parentGlobal = target.parentId ? getGlobalPosition(target.parentId) : { x: 0, y: 0 };
+          const snapped = snapGlobalPosition(
+            currentGlobal.x + dx,
+            currentGlobal.y + dy,
+            target.width,
+            target.height,
+            target.id,
+            5 / viewport.zoom,
+            [target.id]
+          );
+
+          updateNode(target.id, {
+            x: clampCoord(snapped.x - parentGlobal.x, target.x),
+            y: clampCoord(snapped.y - parentGlobal.y, target.y),
+          });
+          setSnapLines(snapped.guides);
+          setTimeout(() => setSnapLines([]), 90);
+        } else {
+          topLevelSelection.forEach((target) => {
+            updateNode(target.id, {
+              x: clampCoord(target.x + dx, target.x),
+              y: clampCoord(target.y + dy, target.y),
+            });
+          });
+          setSnapLines([]);
+        }
+
+        pushHistory();
+        return;
+      }
+
       if (e.key === 'Escape') {
         setContextMenu(null);
+        setSelectedPathAnchor(null);
+      }
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPathAnchor) {
+        e.preventDefault();
+        const node = nodes.find((entry) => entry.id === selectedPathAnchor.nodeId);
+        if (node && node.type === 'path') {
+          const parsed = parsePathData(node.data);
+          const anchors = [...parsed.anchors];
+          if (anchors.length > 2 && selectedPathAnchor.index >= 0 && selectedPathAnchor.index < anchors.length) {
+            anchors.splice(selectedPathAnchor.index, 1);
+            const shouldClose = parsed.closed && anchors.length >= 3;
+            updateNode(node.id, { data: serializePathData(anchors, shouldClose) });
+            pushHistory();
+          }
+        }
+        setSelectedPathAnchor(null);
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -220,7 +299,7 @@ export const Canvas = () => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [editingId, mode, nodes, pushHistory, selectedIds, selectedPathAnchor, setSnapLines, updateNode, viewport.zoom]);
 
   // Tool Tool Handlers
   type PathAnchor = { x: number; y: number; cpIn?: { x: number; y: number }; cpOut?: { x: number; y: number } };
@@ -299,6 +378,77 @@ export const Canvas = () => {
     return result;
   };
 
+  const pointToSegmentDistance = (
+    point: { x: number; y: number },
+    a: { x: number; y: number },
+    b: { x: number; y: number }
+  ) => {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const apx = point.x - a.x;
+    const apy = point.y - a.y;
+    const ab2 = abx * abx + aby * aby;
+    if (ab2 <= 0.000001) {
+      const dx = point.x - a.x;
+      const dy = point.y - a.y;
+      return { distance: Math.sqrt(dx * dx + dy * dy), t: 0 };
+    }
+    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / ab2));
+    const closestX = a.x + abx * t;
+    const closestY = a.y + aby * t;
+    const dx = point.x - closestX;
+    const dy = point.y - closestY;
+    return { distance: Math.sqrt(dx * dx + dy * dy), t };
+  };
+
+  const insertPathAnchorAtPointer = (nodeId: string) => {
+    const node = nodes.find((entry) => entry.id === nodeId);
+    if (!node || node.type !== 'path') return;
+
+    const parsed = parsePathData(node.data);
+    const anchors = [...parsed.anchors];
+    if (anchors.length < 2) return;
+
+    const pointer = getPointerPosition();
+    const globalPos = getGlobalPosition(nodeId);
+    const localPoint = { x: pointer.x - globalPos.x, y: pointer.y - globalPos.y };
+
+    let bestSegmentStart = 0;
+    let bestT = 0.5;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const result = pointToSegmentDistance(localPoint, anchors[i], anchors[i + 1]);
+      if (result.distance < bestDistance) {
+        bestDistance = result.distance;
+        bestSegmentStart = i;
+        bestT = result.t;
+      }
+    }
+
+    if (parsed.closed && anchors.length > 2) {
+      const result = pointToSegmentDistance(localPoint, anchors[anchors.length - 1], anchors[0]);
+      if (result.distance < bestDistance) {
+        bestDistance = result.distance;
+        bestSegmentStart = anchors.length - 1;
+        bestT = result.t;
+      }
+    }
+
+    const start = anchors[bestSegmentStart];
+    const end = bestSegmentStart === anchors.length - 1 ? anchors[0] : anchors[bestSegmentStart + 1];
+    const inserted: PathAnchor = {
+      x: start.x + (end.x - start.x) * bestT,
+      y: start.y + (end.y - start.y) * bestT,
+    };
+
+    const insertionIndex = bestSegmentStart === anchors.length - 1 ? anchors.length : bestSegmentStart + 1;
+    anchors.splice(insertionIndex, 0, inserted);
+    updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
+    setSelectedPathAnchor({ nodeId, index: insertionIndex });
+    pushHistory();
+  };
+
   const zoomToFitSelected = () => {
     if (selectedIds.length === 0) return;
     
@@ -335,27 +485,101 @@ export const Canvas = () => {
     setViewport({ x: newX, y: newY, zoom: finalZoom });
   };
 
-  const handlePointDragMove = (nodeId: string, index: number, _e: CanvasMouseEvent) => {
+  const updatePathAnchors = (nodeId: string, updater: (anchors: PathAnchor[]) => void) => {
     const node = nodes.find(n => n.id === nodeId);
     if (node && node.type === 'path') {
-        const { x, y } = getPointerPosition();
         const parsed = parsePathData(node.data);
         const anchors = [...parsed.anchors];
-        const target = anchors[index];
-        if (!target) return;
-
-        const nextX = x - node.x;
-        const nextY = y - node.y;
-        const dx = nextX - target.x;
-        const dy = nextY - target.y;
-
-        target.x = nextX;
-        target.y = nextY;
-        if (target.cpIn) target.cpIn = { x: target.cpIn.x + dx, y: target.cpIn.y + dy };
-        if (target.cpOut) target.cpOut = { x: target.cpOut.x + dx, y: target.cpOut.y + dy };
-
+        updater(anchors);
         updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
     }
+  };
+
+  const handlePointDragMove = (nodeId: string, index: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || node.type !== 'path') return;
+
+    const pointer = getPointerPosition();
+    const globalPos = getGlobalPosition(nodeId);
+    const nextX = pointer.x - globalPos.x;
+    const nextY = pointer.y - globalPos.y;
+
+    updatePathAnchors(nodeId, (anchors) => {
+      const target = anchors[index];
+      if (!target) return;
+
+      const dx = nextX - target.x;
+      const dy = nextY - target.y;
+
+      target.x = nextX;
+      target.y = nextY;
+      if (target.cpIn) target.cpIn = { x: target.cpIn.x + dx, y: target.cpIn.y + dy };
+      if (target.cpOut) target.cpOut = { x: target.cpOut.x + dx, y: target.cpOut.y + dy };
+    });
+  };
+
+  const handleControlPointDragMove = (nodeId: string, index: number, kind: 'in' | 'out', event: CanvasMouseEvent) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || node.type !== 'path') return;
+
+    const pointer = getPointerPosition();
+    const globalPos = getGlobalPosition(nodeId);
+    const nextX = pointer.x - globalPos.x;
+    const nextY = pointer.y - globalPos.y;
+    const mirrorHandle = !event.evt.altKey;
+
+    updatePathAnchors(nodeId, (anchors) => {
+      const target = anchors[index];
+      if (!target) return;
+      if (kind === 'in') {
+        target.cpIn = { x: nextX, y: nextY };
+        if (mirrorHandle) {
+          target.cpOut = { x: target.x + (target.x - nextX), y: target.y + (target.y - nextY) };
+        }
+      } else {
+        target.cpOut = { x: nextX, y: nextY };
+        if (mirrorHandle) {
+          target.cpIn = { x: target.x + (target.x - nextX), y: target.y + (target.y - nextY) };
+        }
+      }
+    });
+  };
+
+  const togglePathAnchorMode = (nodeId: string, index: number) => {
+    const node = nodes.find((entry) => entry.id === nodeId);
+    if (!node || node.type !== 'path') return;
+
+    const parsed = parsePathData(node.data);
+    const anchors = [...parsed.anchors];
+    const anchor = anchors[index];
+    if (!anchor) return;
+
+    if (anchor.cpIn || anchor.cpOut) {
+      anchor.cpIn = undefined;
+      anchor.cpOut = undefined;
+    } else {
+      const prev = anchors[index - 1] || anchor;
+      const next = anchors[index + 1] || anchor;
+      let vx = next.x - prev.x;
+      let vy = next.y - prev.y;
+      const length = Math.hypot(vx, vy);
+
+      if (length < 0.001) {
+        vx = 1;
+        vy = 0;
+      } else {
+        vx /= length;
+        vy /= length;
+      }
+
+      const handleLength = Math.max(12, Math.min(60, length / 4 || 24));
+      anchor.cpIn = { x: anchor.x - vx * handleLength, y: anchor.y - vy * handleLength };
+      anchor.cpOut = { x: anchor.x + vx * handleLength, y: anchor.y + vy * handleLength };
+    }
+
+    updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
+    setSelectedPathAnchor({ nodeId, index });
+    pushHistory();
   };
 
   // Handle selection Transformer
@@ -394,6 +618,69 @@ export const Canvas = () => {
     return { x: parentPos.x + node.x, y: parentPos.y + node.y };
   };
 
+  const evaluateInteractionCondition = (condition: Interaction['condition']) => {
+    if (!condition) return true;
+
+    const variable = useStore.getState().variables.find((entry) => entry.id === condition.variableId);
+    if (!variable) return false;
+
+    const leftValue = variable.value;
+    const rightValue = condition.value;
+
+    switch (condition.operator) {
+      case '==':
+        return leftValue === rightValue;
+      case '!=':
+        return leftValue !== rightValue;
+      case '>':
+        return Number(leftValue) > Number(rightValue);
+      case '<':
+        return Number(leftValue) < Number(rightValue);
+      case '>=':
+        return Number(leftValue) >= Number(rightValue);
+      case '<=':
+        return Number(leftValue) <= Number(rightValue);
+      default:
+        return false;
+    }
+  };
+
+  const runNodeInteractions = (node: SceneNode, trigger: 'onClick' | 'onHover' | 'onDrag') => {
+    if (mode !== 'prototype') return;
+    const interactions = (node.interactions || []).filter((interaction) => interaction.trigger === trigger);
+    if (interactions.length === 0) return;
+
+    interactions.forEach((interaction) => {
+      if (!evaluateInteractionCondition(interaction.condition)) return;
+      interaction.actions.forEach((action) => {
+        if (action.type === 'navigate') {
+          const targetId = typeof action.targetId === 'string'
+            ? action.targetId
+            : (typeof action.value === 'string' ? action.value : undefined);
+
+          if (targetId && pages.some((page) => page.id === targetId)) {
+            useStore.getState().setPage(targetId);
+          }
+          return;
+        }
+
+        if (action.type === 'setVariable') {
+          if (typeof action.targetId === 'string') {
+            useStore.getState().mutateVariable(action.targetId, action.value);
+          }
+          return;
+        }
+
+        if (action.type === 'toggleVisibility') {
+          if (typeof action.targetId !== 'string') return;
+          const targetNode = nodes.find((entry) => entry.id === action.targetId);
+          if (!targetNode) return;
+          updateNode(action.targetId, { visible: !targetNode.visible });
+        }
+      });
+    });
+  };
+
   const findInnermostFrame = (x: number, y: number, excludeIds: string[] = []): string | undefined => {
     const frames = nodes.filter(n => {
       if ((n.type !== 'frame' && n.type !== 'section') || excludeIds.includes(n.id)) return false;
@@ -405,6 +692,95 @@ export const Canvas = () => {
     if (frames.length === 0) return undefined;
     // Smallest area usually means most nested frame
     return frames.sort((a, b) => (a.width * a.height) - (b.width * b.height))[0].id;
+  };
+
+  const snapGlobalPosition = (
+    globalX: number,
+    globalY: number,
+    width: number,
+    height: number,
+    nodeId: string,
+    snapThreshold: number,
+    excludedIds: string[] = []
+  ): { x: number; y: number; guides: { x?: number; y?: number }[] } => {
+    let snappedX = globalX;
+    let snappedY = globalY;
+    const guides: { x?: number; y?: number }[] = [];
+    const excludedSet = new Set(excludedIds);
+    const dedupeThreshold = Math.max(0.25, snapThreshold * 0.35);
+
+    nodes.forEach((otherNode) => {
+      if (otherNode.id === nodeId || excludedSet.has(otherNode.id)) return;
+      const otherPos = getGlobalPosition(otherNode.id);
+
+      if (Math.abs(snappedX - otherPos.x) < snapThreshold) {
+        snappedX = otherPos.x;
+        guides.push({ x: otherPos.x });
+      }
+      if (Math.abs(snappedX + width / 2 - (otherPos.x + otherNode.width / 2)) < snapThreshold) {
+        snappedX = otherPos.x + otherNode.width / 2 - width / 2;
+        guides.push({ x: otherPos.x + otherNode.width / 2 });
+      }
+      if (Math.abs(snappedX + width - (otherPos.x + otherNode.width)) < snapThreshold) {
+        snappedX = otherPos.x + otherNode.width - width;
+        guides.push({ x: otherPos.x + otherNode.width });
+      }
+
+      if (Math.abs(snappedY - otherPos.y) < snapThreshold) {
+        snappedY = otherPos.y;
+        guides.push({ y: otherPos.y });
+      }
+      if (Math.abs(snappedY + height / 2 - (otherPos.y + otherNode.height / 2)) < snapThreshold) {
+        snappedY = otherPos.y + otherNode.height / 2 - height / 2;
+        guides.push({ y: otherPos.y + otherNode.height / 2 });
+      }
+      if (Math.abs(snappedY + height - (otherPos.y + otherNode.height)) < snapThreshold) {
+        snappedY = otherPos.y + otherNode.height - height;
+        guides.push({ y: otherPos.y + otherNode.height });
+      }
+    });
+
+    persistentGuides.forEach((guide) => {
+      if (guide.type === 'vertical') {
+        if (Math.abs(snappedX - guide.position) < snapThreshold) {
+          snappedX = guide.position;
+          guides.push({ x: guide.position });
+        }
+        if (Math.abs(snappedX + width / 2 - guide.position) < snapThreshold) {
+          snappedX = guide.position - width / 2;
+          guides.push({ x: guide.position });
+        }
+        if (Math.abs(snappedX + width - guide.position) < snapThreshold) {
+          snappedX = guide.position - width;
+          guides.push({ x: guide.position });
+        }
+      } else {
+        if (Math.abs(snappedY - guide.position) < snapThreshold) {
+          snappedY = guide.position;
+          guides.push({ y: guide.position });
+        }
+        if (Math.abs(snappedY + height / 2 - guide.position) < snapThreshold) {
+          snappedY = guide.position - height / 2;
+          guides.push({ y: guide.position });
+        }
+        if (Math.abs(snappedY + height - guide.position) < snapThreshold) {
+          snappedY = guide.position - height;
+          guides.push({ y: guide.position });
+        }
+      }
+    });
+
+    const dedupedGuides: { x?: number; y?: number }[] = [];
+    guides.forEach((guide) => {
+      const hasEquivalent = dedupedGuides.some((existing) => {
+        const xClose = typeof guide.x === 'number' && typeof existing.x === 'number' && Math.abs(guide.x - existing.x) <= dedupeThreshold;
+        const yClose = typeof guide.y === 'number' && typeof existing.y === 'number' && Math.abs(guide.y - existing.y) <= dedupeThreshold;
+        return xClose || yClose;
+      });
+      if (!hasEquivalent) dedupedGuides.push(guide);
+    });
+
+    return { x: snappedX, y: snappedY, guides: dedupedGuides };
   };
 
   const finalizePenPath = (closed: boolean = false) => {
@@ -459,6 +835,10 @@ export const Canvas = () => {
       if (stage) {
         stage.container().style.cursor = 'grabbing';
       }
+      return;
+    }
+
+    if (mode === 'prototype') {
       return;
     }
 
@@ -528,9 +908,11 @@ export const Canvas = () => {
             const { x, y } = getPointerPosition();
             setSelectionRect({ x, y, width: 0, height: 0 });
             setSelectedIds([]);
+          setSelectedPathAnchor(null);
         } else if (clickedFrame) {
             if (e.evt.shiftKey) setSelectedIds(Array.from(new Set([...selectedIds, clickedFrame.id])));
             else setSelectedIds([clickedFrame.id]);
+          setSelectedPathAnchor(null);
         }
       }
       return;
@@ -825,6 +1207,7 @@ export const Canvas = () => {
   };
 
   const handleNodeDragStart = (e: CanvasMouseEvent) => {
+    if (mode === 'prototype') return;
     const id = e.target.id();
     if (!selectedIds.includes(id)) {
       setSelectedIds([id]);
@@ -832,6 +1215,7 @@ export const Canvas = () => {
   };
 
   const handleNodeDragMove = (e: CanvasMouseEvent) => {
+    if (mode === 'prototype') return;
     const node = e.target;
     const stage = stageRef.current;
     if (!stage) return;
@@ -848,39 +1232,14 @@ export const Canvas = () => {
     const parentGlobal = draggedModel.parentId ? getGlobalPosition(draggedModel.parentId) : { x: 0, y: 0 };
 
     const snapThreshold = 5 / viewport.zoom;
-    const newGuides: { x?: number, y?: number }[] = [];
     
-    let currentGlobalX = clampCoord(parentGlobal.x + node.x() - anchorOffsetX, draggedModel.x);
-    let currentGlobalY = clampCoord(parentGlobal.y + node.y() - anchorOffsetY, draggedModel.y);
+    const currentGlobalX = clampCoord(parentGlobal.x + node.x() - anchorOffsetX, draggedModel.x);
+    const currentGlobalY = clampCoord(parentGlobal.y + node.y() - anchorOffsetY, draggedModel.y);
+    const snapped = snapGlobalPosition(currentGlobalX, currentGlobalY, currentWidth, currentHeight, nodeId, snapThreshold);
 
-    nodes.forEach(otherNode => {
-      if (otherNode.id === nodeId) return;
-      const otherPos = getGlobalPosition(otherNode.id);
-
-      // Snap X
-      if (Math.abs(currentGlobalX - otherPos.x) < snapThreshold) {
-        currentGlobalX = otherPos.x;
-        newGuides.push({ x: otherPos.x });
-      }
-      if (Math.abs(currentGlobalX + currentWidth - (otherPos.x + otherNode.width)) < snapThreshold) {
-        currentGlobalX = otherPos.x + otherNode.width - currentWidth;
-        newGuides.push({ x: otherPos.x + otherNode.width });
-      }
-
-      // Snap Y
-      if (Math.abs(currentGlobalY - otherPos.y) < snapThreshold) {
-        currentGlobalY = otherPos.y;
-        newGuides.push({ y: otherPos.y });
-      }
-      if (Math.abs(currentGlobalY + currentHeight - (otherPos.y + otherNode.height)) < snapThreshold) {
-        currentGlobalY = otherPos.y + otherNode.height - currentHeight;
-        newGuides.push({ y: otherPos.y + otherNode.height });
-      }
-    });
-
-    node.x(clampCoord(currentGlobalX - parentGlobal.x + anchorOffsetX, node.x()));
-    node.y(clampCoord(currentGlobalY - parentGlobal.y + anchorOffsetY, node.y()));
-    setSnapLines(newGuides);
+    node.x(clampCoord(snapped.x - parentGlobal.x + anchorOffsetX, node.x()));
+    node.y(clampCoord(snapped.y - parentGlobal.y + anchorOffsetY, node.y()));
+    setSnapLines(snapped.guides);
   };
 
   const handleNodeUpdate = (e: CanvasMouseEvent) => {
@@ -888,6 +1247,18 @@ export const Canvas = () => {
     const nodeId = konvaNode.id();
     const nodeData = nodes.find(n => n.id === nodeId);
     if (!nodeData) return;
+
+    if (mode === 'prototype' && e.type === 'dragend') {
+      runNodeInteractions(nodeData, 'onDrag');
+      const isCenterAnchored = nodeData.type === 'circle' || nodeData.type === 'ellipse';
+      const resetX = isCenterAnchored ? nodeData.x + nodeData.width / 2 : nodeData.x;
+      const resetY = isCenterAnchored ? nodeData.y + nodeData.height / 2 : nodeData.y;
+      konvaNode.x(resetX);
+      konvaNode.y(resetY);
+      konvaNode.getLayer()?.batchDraw();
+      setSnapLines([]);
+      return;
+    }
 
     const isTransformEvent = e.type === 'transformend' || e.type === 'transform';
 
@@ -901,6 +1272,7 @@ export const Canvas = () => {
     const absolutePos = konvaNode.getAbsolutePosition();
     const globalX = clampCoord((absolutePos.x - viewport.x) / viewport.zoom - anchorOffsetX, nodeData.x);
     const globalY = clampCoord((absolutePos.y - viewport.y) / viewport.zoom - anchorOffsetY, nodeData.y);
+    const snappedTransform = snapGlobalPosition(globalX, globalY, newWidth, newHeight, nodeId, 5 / viewport.zoom);
 
     // We want to reparent based on where the node is dropped
     // Exclude self and children to avoid circular dependency
@@ -919,8 +1291,8 @@ export const Canvas = () => {
         excluded
       );
 
-    let finalX = globalX;
-    let finalY = globalY;
+    let finalX = snappedTransform.x;
+    let finalY = snappedTransform.y;
 
     if (newParentId) {
         const parentPos = getGlobalPosition(newParentId);
@@ -944,12 +1316,34 @@ export const Canvas = () => {
           verticalResizing: 'fixed' 
       } : {})
     });
-    setSnapLines([]);
+    setSnapLines(snappedTransform.guides);
+    setTimeout(() => setSnapLines([]), 90);
     pushHistory();
   };
 
   const renderSingleNode = (node: SceneNode) => {
     const isSelected = selectedIds.includes(node.id);
+    const resolveVariableBinding = (bindingKey: 'fill' | 'stroke' | 'opacity' | 'text') => {
+      const variableId = node.variableBindings?.[bindingKey];
+      if (!variableId) return undefined;
+      return variables.find((entry) => entry.id === variableId)?.value;
+    };
+
+    const boundFillValue = resolveVariableBinding('fill');
+    const boundStrokeValue = resolveVariableBinding('stroke');
+    const boundOpacityValue = resolveVariableBinding('opacity');
+    const boundTextValue = resolveVariableBinding('text');
+
+    const effectiveFill = typeof boundFillValue === 'string' ? boundFillValue : (node.fill || '#D9D9D9');
+    const effectiveStroke = typeof boundStrokeValue === 'string' ? boundStrokeValue : (node.stroke || '#000000');
+    const numericOpacity = typeof boundOpacityValue === 'number' ? boundOpacityValue : Number(boundOpacityValue);
+    const effectiveOpacity = Number.isFinite(numericOpacity)
+      ? Math.max(0, Math.min(1, numericOpacity))
+      : (node.opacity || 1);
+    const effectiveText = node.type === 'text' && typeof boundTextValue !== 'undefined'
+      ? String(boundTextValue)
+      : (node.type === 'text' ? node.text : undefined);
+
     const getVisibleFills = (paints: Paint[] | undefined, fallback: string): Paint[] => {
       const visible = (paints || []).filter((paint) => paint.visible !== false);
       if (visible.length > 0) return visible;
@@ -991,7 +1385,7 @@ export const Canvas = () => {
 
     const getPaintFillProps = (paint: Paint | undefined, fallback: string) => {
       const safePaint = paint || { id: `${node.id}-safe`, type: 'solid' as const, color: fallback, opacity: 1, visible: true };
-      const opacity = (node.opacity || 1) * (safePaint.opacity || 1);
+      const opacity = effectiveOpacity * (safePaint.opacity || 1);
 
       if (safePaint.type === 'solid') {
         return { fill: safePaint.color || fallback, opacity };
@@ -1020,15 +1414,15 @@ export const Canvas = () => {
       };
     };
 
-    const fillPaints = getVisibleFills(node.fills, node.fill || '#D9D9D9');
+    const fillPaints = getVisibleFills(node.fills, effectiveFill);
     const topFillPaint = fillPaints[fillPaints.length - 1];
     const underFillPaints = fillPaints.slice(0, -1);
-    let fillProps = getPaintFillProps(topFillPaint, node.fill || '#D9D9D9');
+    let fillProps = getPaintFillProps(topFillPaint, effectiveFill);
 
-    const strokePaints = getVisibleStrokes(node.strokes, node.stroke || '#000000');
+    const strokePaints = getVisibleStrokes(node.strokes, effectiveStroke);
     const topStrokePaint = strokePaints[strokePaints.length - 1];
-    const strokeColor = topStrokePaint?.type === 'solid' ? (topStrokePaint.color || node.stroke) : node.stroke;
-    const strokeOpacity = (node.opacity || 1) * (topStrokePaint?.opacity || 1);
+    const strokeColor = topStrokePaint?.type === 'solid' ? (topStrokePaint.color || effectiveStroke) : effectiveStroke;
+    const strokeOpacity = effectiveOpacity * (topStrokePaint?.opacity || 1);
 
     // Keep mask visuals readable and non-destructive on canvas.
     if (node.isMask) {
@@ -1051,10 +1445,25 @@ export const Canvas = () => {
     } : {};
 
     const layerBlur = effects.find((effect) => effect.visible !== false && effect.type === 'layer-blur');
+    const backgroundBlur = effects.find((effect) => effect.visible !== false && effect.type === 'background-blur');
+    const innerShadow = effects.find((effect) => effect.visible !== false && effect.type === 'inner-shadow');
     const blurProps = layerBlur ? {
         filters: [Konva.Filters.Blur],
         blurRadius: layerBlur.radius,
     } : {};
+
+    const innerShadowColor = innerShadow?.color || 'rgba(0, 0, 0, 0.65)';
+    const innerShadowOffset = innerShadow?.offset || { x: 0, y: 0 };
+    const innerShadowBlur = Math.max(0, innerShadow?.radius || 0);
+
+    const backgroundBlurOverlayProps = backgroundBlur
+      ? {
+          filters: [Konva.Filters.Blur],
+          blurRadius: Math.max(0, backgroundBlur.radius || 0),
+          opacity: 0.16,
+          fill: 'rgba(255,255,255,0.32)',
+        }
+      : null;
 
     const blendModeMap: Record<string, GlobalCompositeOperation> = {
       'pass-through': 'source-over',
@@ -1073,7 +1482,13 @@ export const Canvas = () => {
       height: node.height,
       rotation: node.rotation,
       globalCompositeOperation: blendModeMap[node.blendMode || 'normal'] || 'source-over',
-      draggable: node.draggable && !node.locked && tool === 'select' && !isPanning,
+      draggable:
+        node.draggable &&
+        !node.locked &&
+        !isPanning &&
+        (mode === 'prototype'
+          ? (node.interactions || []).some((interaction) => interaction.trigger === 'onDrag')
+          : tool === 'select'),
       listening: node.visible,
       dash: node.isMask ? [8 / viewport.zoom, 4 / viewport.zoom] : undefined,
       cornerRadius: cornerRadiusArray,
@@ -1116,15 +1531,26 @@ export const Canvas = () => {
       onClick: (e: CanvasMouseEvent) => {
         if (node.locked) return;
         if (typeof e.evt.button === 'number' && e.evt.button !== 0) return;
+
+        if (mode === 'prototype') {
+          e.cancelBubble = true;
+          runNodeInteractions(node, 'onClick');
+          return;
+        }
+
         e.cancelBubble = true;
         if (e.evt.shiftKey) {
           setSelectedIds(Array.from(new Set([...selectedIds, node.id])));
         } else {
           setSelectedIds([node.id]);
         }
+        setSelectedPathAnchor(null);
       },
       onDblClick: () => handleTextDblClick(node),
-      onMouseEnter: () => useStore.getState().setHoveredId(node.id),
+      onMouseEnter: () => {
+        useStore.getState().setHoveredId(node.id);
+        runNodeInteractions(node, 'onHover');
+      },
       onMouseLeave: () => useStore.getState().setHoveredId(null),
     };
 
@@ -1184,7 +1610,7 @@ export const Canvas = () => {
                     } : undefined}
                 >
                   {underFillPaints.map((paint) => {
-                    const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+                    const layerProps = getPaintFillProps(paint, effectiveFill);
                     if (hasSmoothing) {
                       return (
                         <Path
@@ -1245,6 +1671,50 @@ export const Canvas = () => {
                       />
                     )
                   )}
+                  {backgroundBlurOverlayProps && (
+                    hasSmoothing ? (
+                      <Path
+                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                        {...backgroundBlurOverlayProps}
+                        listening={false}
+                      />
+                    ) : (
+                      <Rect
+                        width={node.width}
+                        height={node.height}
+                        cornerRadius={cornerRadiusArray}
+                        {...backgroundBlurOverlayProps}
+                        listening={false}
+                      />
+                    )
+                  )}
+                  {innerShadow && (
+                    hasSmoothing ? (
+                      <Path
+                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                        fill={innerShadowColor}
+                        opacity={0.12}
+                        shadowColor={innerShadowColor}
+                        shadowBlur={innerShadowBlur}
+                        shadowOffset={innerShadowOffset}
+                        globalCompositeOperation="source-atop"
+                        listening={false}
+                      />
+                    ) : (
+                      <Rect
+                        width={node.width}
+                        height={node.height}
+                        cornerRadius={cornerRadiusArray}
+                        fill={innerShadowColor}
+                        opacity={0.12}
+                        shadowColor={innerShadowColor}
+                        shadowBlur={innerShadowBlur}
+                        shadowOffset={innerShadowOffset}
+                        globalCompositeOperation="source-atop"
+                        listening={false}
+                      />
+                    )
+                  )}
                     {selectionProps && (
                         <Rect 
                             width={node.width}
@@ -1287,7 +1757,7 @@ export const Canvas = () => {
         return (
             <Group key={node.id}>
           {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            const layerProps = getPaintFillProps(paint, effectiveFill);
             if (hasSmoothing) {
               return (
                 <Path
@@ -1358,6 +1828,62 @@ export const Canvas = () => {
               />
             )
           )}
+          {backgroundBlurOverlayProps && (
+            hasSmoothing ? (
+              <Path
+                x={node.x}
+                y={node.y}
+                rotation={node.rotation}
+                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                {...backgroundBlurOverlayProps}
+                listening={false}
+              />
+            ) : (
+              <Rect
+                x={node.x}
+                y={node.y}
+                width={node.width}
+                height={node.height}
+                rotation={node.rotation}
+                cornerRadius={cornerRadiusArray}
+                {...backgroundBlurOverlayProps}
+                listening={false}
+              />
+            )
+          )}
+          {innerShadow && (
+            hasSmoothing ? (
+              <Path
+                x={node.x}
+                y={node.y}
+                rotation={node.rotation}
+                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
+                fill={innerShadowColor}
+                opacity={0.12}
+                shadowColor={innerShadowColor}
+                shadowBlur={innerShadowBlur}
+                shadowOffset={innerShadowOffset}
+                globalCompositeOperation="source-atop"
+                listening={false}
+              />
+            ) : (
+              <Rect
+                x={node.x}
+                y={node.y}
+                width={node.width}
+                height={node.height}
+                rotation={node.rotation}
+                cornerRadius={cornerRadiusArray}
+                fill={innerShadowColor}
+                opacity={0.12}
+                shadowColor={innerShadowColor}
+                shadowBlur={innerShadowBlur}
+                shadowOffset={innerShadowOffset}
+                globalCompositeOperation="source-atop"
+                listening={false}
+              />
+            )
+          )}
                 {selectionProps && (
                     <Rect 
                         x={node.x} y={node.y} width={node.width} height={node.height}
@@ -1402,7 +1928,7 @@ export const Canvas = () => {
         return (
             <Group key={node.id}>
           {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            const layerProps = getPaintFillProps(paint, effectiveFill);
             return (
               <Circle
                 key={`${node.id}-under-${paint.id}`}
@@ -1429,6 +1955,31 @@ export const Canvas = () => {
               opacity={strokeOpacity}
               listening={false}
               lineJoin="round"
+            />
+          )}
+          {backgroundBlurOverlayProps && (
+            <Circle
+              x={node.x + radius}
+              y={node.y + radius}
+              radius={radius}
+              rotation={node.rotation}
+              {...backgroundBlurOverlayProps}
+              listening={false}
+            />
+          )}
+          {innerShadow && (
+            <Circle
+              x={node.x + radius}
+              y={node.y + radius}
+              radius={radius}
+              rotation={node.rotation}
+              fill={innerShadowColor}
+              opacity={0.12}
+              shadowColor={innerShadowColor}
+              shadowBlur={innerShadowBlur}
+              shadowOffset={innerShadowOffset}
+              globalCompositeOperation="source-atop"
+              listening={false}
             />
           )}
                 {selectionProps && (
@@ -1460,7 +2011,7 @@ export const Canvas = () => {
         return (
             <Group key={node.id}>
           {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+            const layerProps = getPaintFillProps(paint, effectiveFill);
             return (
               <Ellipse
                 key={`${node.id}-under-${paint.id}`}
@@ -1491,6 +2042,33 @@ export const Canvas = () => {
               lineJoin="round"
             />
           )}
+          {backgroundBlurOverlayProps && (
+            <Ellipse
+              x={node.x + radiusX}
+              y={node.y + radiusY}
+              radiusX={radiusX}
+              radiusY={radiusY}
+              rotation={node.rotation}
+              {...backgroundBlurOverlayProps}
+              listening={false}
+            />
+          )}
+          {innerShadow && (
+            <Ellipse
+              x={node.x + radiusX}
+              y={node.y + radiusY}
+              radiusX={radiusX}
+              radiusY={radiusY}
+              rotation={node.rotation}
+              fill={innerShadowColor}
+              opacity={0.12}
+              shadowColor={innerShadowColor}
+              shadowBlur={innerShadowBlur}
+              shadowOffset={innerShadowOffset}
+              globalCompositeOperation="source-atop"
+              listening={false}
+            />
+          )}
                 {selectionProps && (
                     <Ellipse 
                         x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
@@ -1516,7 +2094,7 @@ export const Canvas = () => {
               y={node.y}
               rotation={node.rotation}
               data={node.data}
-              {...getPaintFillProps(paint, node.fill || '#D9D9D9')}
+              {...getPaintFillProps(paint, effectiveFill)}
               lineJoin="round"
               listening={false}
             />
@@ -1536,6 +2114,31 @@ export const Canvas = () => {
               listening={false}
             />
           )}
+          {backgroundBlurOverlayProps && (
+            <Path
+              x={node.x}
+              y={node.y}
+              rotation={node.rotation}
+              data={node.data}
+              {...backgroundBlurOverlayProps}
+              listening={false}
+            />
+          )}
+          {innerShadow && (
+            <Path
+              x={node.x}
+              y={node.y}
+              rotation={node.rotation}
+              data={node.data}
+              fill={innerShadowColor}
+              opacity={0.12}
+              shadowColor={innerShadowColor}
+              shadowBlur={innerShadowBlur}
+              shadowOffset={innerShadowOffset}
+              globalCompositeOperation="source-atop"
+              listening={false}
+            />
+          )}
                 {hoverProps && <Path data={node.data} rotation={node.rotation} {...hoverProps} x={node.x} y={node.y} />}
             </Group>
         );
@@ -1544,22 +2147,104 @@ export const Canvas = () => {
             const handles = [];
           for (let idx = 0; idx < parsed.anchors.length; idx++) {
             const anchor = parsed.anchors[idx];
+                const anchorX = node.x + anchor.x;
+                const anchorY = node.y + anchor.y;
+
+                if (anchor.cpIn) {
+                  handles.push(
+                    <Line
+                      key={`${node.id}-line-in-${idx}`}
+                      points={[anchorX, anchorY, node.x + anchor.cpIn.x, node.y + anchor.cpIn.y]}
+                      stroke="#6366F1"
+                      strokeWidth={1 / viewport.zoom}
+                      opacity={0.5}
+                      listening={false}
+                    />
+                  );
+                  handles.push(
+                    <Circle
+                      key={`${node.id}-cp-in-${idx}`}
+                      x={node.x + anchor.cpIn.x}
+                      y={node.y + anchor.cpIn.y}
+                      radius={3.5 / viewport.zoom}
+                      fill="#1D4ED8"
+                      stroke="#DBEAFE"
+                      strokeWidth={1 / viewport.zoom}
+                      draggable
+                      onMouseDown={(evt) => {
+                        evt.cancelBubble = true;
+                      }}
+                      onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'in', evt)}
+                      onDragEnd={() => pushHistory()}
+                    />
+                  );
+                }
+
+                if (anchor.cpOut) {
+                  handles.push(
+                    <Line
+                      key={`${node.id}-line-out-${idx}`}
+                      points={[anchorX, anchorY, node.x + anchor.cpOut.x, node.y + anchor.cpOut.y]}
+                      stroke="#6366F1"
+                      strokeWidth={1 / viewport.zoom}
+                      opacity={0.5}
+                      listening={false}
+                    />
+                  );
+                  handles.push(
+                    <Circle
+                      key={`${node.id}-cp-out-${idx}`}
+                      x={node.x + anchor.cpOut.x}
+                      y={node.y + anchor.cpOut.y}
+                      radius={3.5 / viewport.zoom}
+                      fill="#1D4ED8"
+                      stroke="#DBEAFE"
+                      strokeWidth={1 / viewport.zoom}
+                      draggable
+                      onMouseDown={(evt) => {
+                        evt.cancelBubble = true;
+                      }}
+                      onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'out', evt)}
+                      onDragEnd={() => pushHistory()}
+                    />
+                  );
+                }
+
                 handles.push(
                     <Circle
                         key={`${node.id}-point-${idx}`}
-                x={node.x + anchor.x}
-                y={node.y + anchor.y}
+                x={anchorX}
+                y={anchorY}
                         radius={4 / viewport.zoom}
-                        fill="#FFFFFF"
+                        fill={selectedPathAnchor?.nodeId === node.id && selectedPathAnchor.index === idx ? '#6366F1' : '#FFFFFF'}
                         stroke="#6366F1"
                         strokeWidth={1 / viewport.zoom}
                         draggable
-                        onDragMove={(e) => handlePointDragMove(node.id, idx, e)}
+                        onMouseDown={(evt) => {
+                          evt.cancelBubble = true;
+                          setSelectedPathAnchor({ nodeId: node.id, index: idx });
+                        }}
+                        onDblClick={(evt) => {
+                          evt.cancelBubble = true;
+                          togglePathAnchorMode(node.id, idx);
+                        }}
+                        onDragMove={() => handlePointDragMove(node.id, idx)}
                         onDragEnd={() => pushHistory()}
                     />
                 );
             }
-            return <React.Fragment key={node.id}>{pathComp}{handles}</React.Fragment>;
+            return (
+              <Group
+                key={node.id}
+                onDblClick={(evt) => {
+                  evt.cancelBubble = true;
+                  insertPathAnchorAtPointer(node.id);
+                }}
+              >
+                {pathComp}
+                {handles}
+              </Group>
+            );
         }
         return pathComp;
     }
@@ -1567,12 +2252,12 @@ export const Canvas = () => {
       const lineHeight = node.lineHeight ? node.lineHeight / node.fontSize : 1.2;
       const isVerticalWriting = node.writingMode === 'vertical-rl' || node.writingMode === 'vertical-lr';
       const resolvedRotation = node.rotation || (isVerticalWriting ? 90 : 0);
-      const topTextPaintProps = getPaintFillProps(topFillPaint, node.fill || '#D9D9D9');
+      const topTextPaintProps = getPaintFillProps(topFillPaint, effectiveFill);
       const baseTextOpacity = Number.isFinite((topTextPaintProps as { opacity?: number }).opacity)
         ? Number((topTextPaintProps as { opacity?: number }).opacity)
-        : (node.opacity || 1);
+        : effectiveOpacity;
       const textBaseProps = {
-        text: node.text,
+        text: effectiveText || node.text,
         fontSize: node.fontSize,
         fontFamily: node.fontFamily,
         align: node.align,
@@ -1588,10 +2273,10 @@ export const Canvas = () => {
       return (
         <Group key={node.id}>
             {underFillPaints.map((paint) => {
-              const layerPaintProps = getPaintFillProps(paint, node.fill || '#D9D9D9');
+              const layerPaintProps = getPaintFillProps(paint, effectiveFill);
               const layerOpacity = Number.isFinite((layerPaintProps as { opacity?: number }).opacity)
                 ? Number((layerPaintProps as { opacity?: number }).opacity)
-                : (node.opacity || 1);
+                : effectiveOpacity;
               return (
                 <Text
                   key={`${node.id}-under-${paint.id}`}
@@ -1924,6 +2609,23 @@ export const Canvas = () => {
                       : [-10000, g.position, 10000, g.position]}
                   stroke="#3B82F6"
                   strokeWidth={1 / viewport.zoom}
+                  draggable
+                  hitStrokeWidth={10 / viewport.zoom}
+                  onDragMove={(e) => {
+                    const guideNode = e.target;
+                    const nextPos = g.type === 'vertical'
+                      ? g.position + guideNode.x()
+                      : g.position + guideNode.y();
+                    updateGuide(g.id, nextPos);
+                    guideNode.x(0);
+                    guideNode.y(0);
+                  }}
+                  onDragEnd={() => pushHistory()}
+                  onDblClick={(e) => {
+                    e.cancelBubble = true;
+                    removeGuide(g.id);
+                    pushHistory();
+                  }}
               />
             ))}
 
