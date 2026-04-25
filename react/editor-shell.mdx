@@ -1,0 +1,92 @@
+---
+title: React Editor Shell
+description: Use the packaged editor components from nova-design-engine/react.
+---
+
+# React Editor Shell
+
+The `nova-design-engine/react` subpath exposes the packaged editor UI plus lower-level composition primitives.
+
+## Fastest Path
+
+```tsx
+import { NovaEditorShell } from 'nova-design-engine/react';
+
+export default function App() {
+  return <NovaEditorShell showChat />;
+}
+```
+
+## Composition API
+
+If you want to replace panels or layout slots, use `NovaEditorComposer` directly.
+
+```tsx
+import {
+  Canvas,
+  LayersPanel,
+  NovaAI,
+  NovaEditorComposer,
+  PropertiesPanel,
+  Toolbar,
+} from 'nova-design-engine/react';
+
+export default function App() {
+  return (
+    <NovaEditorComposer
+      accentColor="#14b8a6"
+      panelBackgroundColor="#111315"
+      borderColor="#2f3539"
+      layers={<LayersPanel />}
+      canvas={<Canvas />}
+      toolbar={<Toolbar />}
+      properties={<PropertiesPanel modeTabsAccentColor="#14b8a6" />}
+      assistant={<NovaAI />}
+    />
+  );
+}
+```
+
+## Exported React Surface
+
+- Components: `NovaEditorShell`, `NovaEditorComposer`, `Canvas`, `Toolbar`, `LayersPanel`, `PropertiesPanel`, `ModeTabs`, `NovaAI`.
+- State: `useStore`.
+- Theme: `NovaThemeProvider` plus theme-related types.
+- AI helpers: `setNovaAIBinding`, `getNovaAIBinding`, `hasNovaAIBinding`.
+
+## Wiring AI Safely
+
+```tsx
+import {
+  NovaEditorShell,
+  setNovaAIBinding,
+  type NovaLLMBinding,
+} from 'nova-design-engine/react';
+
+const binding: NovaLLMBinding = {
+  async complete(input) {
+    const response = await fetch('/api/nova/complete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    return response.text();
+  },
+  async generateImage(prompt) {
+    const response = await fetch('/api/nova/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    return response.text();
+  },
+};
+
+setNovaAIBinding(binding);
+
+export default function App() {
+  return <NovaEditorShell showChat />;
+}
+```
+
+Do not expose provider secrets in browser environment variables.

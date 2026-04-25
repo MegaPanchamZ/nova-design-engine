@@ -1,0 +1,43 @@
+---
+title: Browser And Parser Imports
+description: Use browser-safe and parser-safe subpath imports.
+---
+
+# Browser And Parser Imports
+
+Nova Design Engine exposes focused subpath imports so browser consumers do not accidentally pull in the wrong runtime surface.
+
+## Browser Exports
+
+Use `nova-design-engine/browser` for browser-side export helpers:
+
+```ts
+import { exportToPDF, exportToSVG, triggerDownload } from 'nova-design-engine/browser';
+```
+
+These helpers are intended for client-side export and download flows.
+
+## Parser Export
+
+Use `nova-design-engine/parser` when you want the parser entrypoint directly:
+
+```ts
+import { parseHTMLToNodes } from 'nova-design-engine/parser';
+```
+
+This is the safest import path for apps that only need HTML-to-node parsing without pulling in unrelated exports.
+
+## Main Package Exports
+
+The root package exports core types, layout utilities, orchestration helpers, bindings, and presets:
+
+```ts
+import {
+  calculateLayout,
+  mergeGeneratedNodes,
+  runNovaTurn,
+  type SceneNode,
+} from 'nova-design-engine';
+```
+
+See [Core Toolkit](/reference/core-toolkit) for the main runtime surface.

@@ -1,0 +1,71 @@
+---
+title: AI Bindings
+description: Wire Nova Design Engine to your own model provider safely.
+---
+
+# AI Bindings
+
+Nova Design Engine does not ship with provider credentials or browser-side API key handling. Your app supplies a `NovaLLMBinding` implementation.
+
+## Binding Shape
+
+```ts
+import type { NovaLLMBinding } from 'nova-design-engine';
+
+const binding: NovaLLMBinding = {
+  async complete(input) {
+    return '[MESSAGE]ok[/MESSAGE][HTML]<div id="root"></div>[/HTML][TWEAKS][][/TWEAKS]';
+  },
+  async generateImage(prompt) {
+    return '';
+  },
+};
+```
+
+## Response Format
+
+`complete(...)` should return raw text containing these blocks:
+
+- `[MESSAGE]...[/MESSAGE]` for the assistant response.
+- `[HTML]...[/HTML]` for generated layout markup.
+- `[TWEAKS]...[/TWEAKS]` for structured tweak instructions.
+
+## Recommended Deployment Model
+
+Run the binding on your server or trusted API route. That keeps model secrets out of the browser and lets you add auth, quotas, and auditing around AI calls.
+
+```ts
+import type { NovaLLMBinding } from 'nova-design-engine';
+
+export const binding: NovaLLMBinding = {
+  async complete(input) {
+    const response = await fetch('/api/nova/complete', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    return response.text();
+  },
+  async generateImage(prompt) {
+    const response = await fetch('/api/nova/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    return response.text();
+  },
+};
+```
+
+## Editor Integration Helpers
+
+The main package exports helpers for editor hosts:
+
+- `createNovaEditorBindings()` returns the default `runTurn` and `mergeNodes` bindings.
+- `applyNovaTurnToState(...)` merges generated nodes into existing editor state and appends AI history.
+
+## React Security Note
+
+The React package intentionally avoids reading `NEXT_PUBLIC_*` model secrets. `NovaAI` remains disabled until your app calls `setNovaAIBinding(...)` with a secure binding.
+
+See [React Editor Shell](/react/editor-shell) for the UI integration path.

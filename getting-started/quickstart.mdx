@@ -1,0 +1,89 @@
+---
+title: Quickstart
+description: Install Nova Design Engine and run a first design turn.
+---
+
+# Quickstart
+
+This walkthrough gets you from install to a working Nova turn with the fewest moving parts.
+
+## 1. Install The Package
+
+```bash
+npm install nova-design-engine
+```
+
+If you will use the React editor package, install peer dependencies in the host app:
+
+```bash
+npm install react react-dom
+```
+
+## 2. Implement A Binding
+
+Nova Design Engine is provider-agnostic. Your app supplies a `NovaLLMBinding` that returns raw text in Nova's response envelope.
+
+```ts
+import type { NovaLLMBinding } from 'nova-design-engine';
+
+export const binding: NovaLLMBinding = {
+  async complete(input) {
+    return [
+      '[MESSAGE]Created a simple layout.[/MESSAGE]',
+      '[HTML]<div id="root"><section><h1>Signup</h1><p>Join the waitlist.</p></section></div>[/HTML]',
+      '[TWEAKS][][/TWEAKS]',
+    ].join('');
+  },
+  async generateImage(prompt) {
+    return '';
+  },
+};
+```
+
+## 3. Run A Turn
+
+```ts
+import { runNovaTurn } from 'nova-design-engine';
+import { binding } from './binding';
+
+const turn = await runNovaTurn(binding, {
+  prompt: 'Create a compact signup panel',
+  history: [],
+  contextNodes: [],
+  selectedIds: [],
+  basePosition: { x: 80, y: 80 },
+});
+```
+
+The result includes parsed metadata, generated nodes, and the assistant message.
+
+## 4. Merge The Result Into Editor State
+
+If you are hosting your own editor state, use the bindings helpers:
+
+```ts
+import { applyNovaTurnToState } from 'nova-design-engine';
+
+const applied = applyNovaTurnToState({
+  existingNodes,
+  selectedIds,
+  history,
+  prompt: 'Create a compact signup panel',
+  turn,
+});
+```
+
+`applied` returns merged nodes, updated selections, appended AI history, and parsed tweaks.
+
+## 5. Know The Main Entry Points
+
+- `nova-design-engine`: core types, layout, orchestration, bindings, presets.
+- `nova-design-engine/react`: editor components and AI binding hooks.
+- `nova-design-engine/browser`: `exportToSVG`, `exportToPDF`, `triggerDownload`.
+- `nova-design-engine/parser`: browser-safe HTML parsing import.
+
+## Next Steps
+
+- Use [AI Bindings](/getting-started/ai-bindings) for a production-safe server-backed binding.
+- Use [React Editor Shell](/react/editor-shell) if you want the prebuilt editor UI.
+- Use [Adapters](/integrations/adapters) if you want an official provider integration.

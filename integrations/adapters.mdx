@@ -1,0 +1,46 @@
+---
+title: Adapters
+description: Official provider adapters for NovaLLMBinding.
+---
+
+# Adapters
+
+Nova Design Engine ships official adapters for teams that want a maintained provider integration instead of writing a `NovaLLMBinding` from scratch.
+
+## OpenAI Adapter
+
+```bash
+npm install nova-design-engine @nova-design-engine/adapter-openai openai
+```
+
+```ts
+import { createOpenAINovaBinding } from '@nova-design-engine/adapter-openai';
+
+const binding = createOpenAINovaBinding({
+  apiKey: process.env.OPENAI_API_KEY,
+  model: 'gpt-4o',
+});
+```
+
+## Google GenAI Adapter
+
+```bash
+npm install nova-design-engine @nova-design-engine/adapter-google-genai @google/genai
+```
+
+```ts
+import { createGoogleGenAINovaBinding } from '@nova-design-engine/adapter-google-genai';
+
+const binding = createGoogleGenAINovaBinding({
+  apiKey: process.env.GOOGLE_API_KEY,
+  model: 'gemini-2.5-flash',
+});
+```
+
+## Deployment Guidance
+
+- Use adapters on the server or in a trusted backend.
+- Keep provider keys out of browser code.
+- Route React UI calls through your own API endpoints.
+
+If you need a custom provider, follow the [AI Bindings](/getting-started/ai-bindings) pattern instead.

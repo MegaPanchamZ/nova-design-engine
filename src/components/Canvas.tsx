@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import { useStore } from '../store';
-import { createDefaultNode, Effect, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
+import { createDefaultNode, Effect, FrameNode, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
 import Konva from 'konva';
 import { measureText } from '../lib/measureText';
 import { getSuperellipsePath } from '../lib/geometry';
@@ -23,6 +23,7 @@ import { isDrawingTool as isRegisteredDrawingTool, isSelectionTool, matchToolSho
 import type { DrawingToolType } from '../lib/toolRegistry';
 import { computeViewportForZoomBox, getSelectableHitStack, normalizeCanvasRect, resolveDirectSelectCycle } from '../lib/toolSemantics';
 import type { DirectSelectCycleState } from '../lib/toolSemantics';
+import { AutoLayoutDropPreview, getAutoLayoutDropPreview } from '../lib/autoLayoutDrop';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
@@ -43,7 +44,7 @@ interface KonvaImageProps {
   hoverProps: React.ComponentProps<typeof Rect> | null;
 }
 
-const isFrameLikeNode = (node: SceneNode): boolean =>
+const isFrameLikeNode = (node: SceneNode): node is FrameNode =>
   node.type === 'frame' ||
   node.type === 'section' ||
   node.type === 'group' ||
@@ -169,7 +170,7 @@ export const Canvas = () => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setTool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
-    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables
+    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables, moveNodeHierarchy
   } = useStore();
   
   const currentPage = pages.find(p => p.id === currentPageId);
@@ -203,6 +204,7 @@ export const Canvas = () => {
   const [directSelectHoverIds, setDirectSelectHoverIds] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [selectedPathAnchor, setSelectedPathAnchor] = useState<{ nodeId: string; index: number } | null>(null);
+  const [autoLayoutDropPreview, setAutoLayoutDropPreview] = useState<AutoLayoutDropPreview | null>(null);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
@@ -232,6 +234,12 @@ export const Canvas = () => {
       setDirectSelectHoverIds([]);
     }
   }, [tool]);
+
+  useEffect(() => {
+    if (mode === 'prototype') {
+      setAutoLayoutDropPreview(null);
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -692,6 +700,17 @@ export const Canvas = () => {
 
     if (frames.length === 0) return undefined;
     // Smallest area usually means most nested frame
+    return frames.sort((a, b) => (a.width * a.height) - (b.width * b.height))[0].id;
+  };
+
+  const findInnermostAutoLayoutFrame = (x: number, y: number, excludeIds: string[] = []): string | undefined => {
+    const frames = nodes.filter((node) => {
+      if (!isFrameLikeNode(node) || node.layoutMode === 'none' || excludeIds.includes(node.id)) return false;
+      const globalPos = getGlobalPosition(node.id);
+      return x >= globalPos.x && x <= globalPos.x + node.width && y >= globalPos.y && y <= globalPos.y + node.height;
+    });
+
+    if (frames.length === 0) return undefined;
     return frames.sort((a, b) => (a.width * a.height) - (b.width * b.height))[0].id;
   };
 
@@ -1235,6 +1254,7 @@ export const Canvas = () => {
   const handleNodeDragStart = (e: CanvasMouseEvent) => {
     if (mode === 'prototype') return;
     const id = e.target.id();
+    setAutoLayoutDropPreview(null);
     if (!selectedIds.includes(id)) {
       setSelectedIds([id]);
     }
@@ -1266,6 +1286,27 @@ export const Canvas = () => {
     node.x(clampCoord(snapped.x - parentGlobal.x + anchorOffsetX, node.x()));
     node.y(clampCoord(snapped.y - parentGlobal.y + anchorOffsetY, node.y()));
     setSnapLines(snapped.guides);
+
+    const excludedIds = [nodeId, ...collectDescendantIds(nodeId)];
+    const pointerCenter = {
+      x: snapped.x + currentWidth / 2,
+      y: snapped.y + currentHeight / 2,
+    };
+    const autoLayoutParentId = findInnermostAutoLayoutFrame(pointerCenter.x, pointerCenter.y, excludedIds);
+
+    if (!autoLayoutParentId) {
+      setAutoLayoutDropPreview(null);
+      return;
+    }
+
+    const autoLayoutParent = nodes.find((entry) => entry.id === autoLayoutParentId);
+    if (!autoLayoutParent || !isFrameLikeNode(autoLayoutParent) || autoLayoutParent.layoutMode === 'none') {
+      setAutoLayoutDropPreview(null);
+      return;
+    }
+
+    const siblingCandidates = nodes.filter((entry) => entry.parentId === autoLayoutParentId && !excludedIds.includes(entry.id));
+    setAutoLayoutDropPreview(getAutoLayoutDropPreview(autoLayoutParent, siblingCandidates, pointerCenter, getGlobalPosition));
   };
 
   const handleNodeUpdate = (e: CanvasMouseEvent) => {
@@ -1283,10 +1324,20 @@ export const Canvas = () => {
       konvaNode.y(resetY);
       konvaNode.getLayer()?.batchDraw();
       setSnapLines([]);
+      setAutoLayoutDropPreview(null);
       return;
     }
 
     const isTransformEvent = e.type === 'transformend' || e.type === 'transform';
+    const activeAutoLayoutDropPreview = !isTransformEvent ? autoLayoutDropPreview : null;
+
+    if (activeAutoLayoutDropPreview) {
+      setAutoLayoutDropPreview(null);
+      setSnapLines([]);
+      moveNodeHierarchy(nodeId, activeAutoLayoutDropPreview.targetId, activeAutoLayoutDropPreview.position);
+      pushHistory();
+      return;
+    }
 
     const newWidth = clampSize(Math.abs(konvaNode.width() * konvaNode.scaleX()), Math.abs(nodeData.width));
     const newHeight = clampSize(Math.abs(konvaNode.height() * konvaNode.scaleY()), Math.abs(nodeData.height));
@@ -1384,9 +1435,95 @@ export const Canvas = () => {
       konvaNode.scaleY(1);
     }
 
+    setAutoLayoutDropPreview(null);
     setSnapLines(snappedTransform.guides);
     setTimeout(() => setSnapLines([]), 90);
     pushHistory();
+  };
+
+  const renderAutoLayoutDropPreview = () => {
+    if (!autoLayoutDropPreview) return null;
+
+    if (autoLayoutDropPreview.marker.kind === 'box') {
+      const marker = autoLayoutDropPreview.marker;
+      return (
+        <Group listening={false}>
+          <Rect
+            x={marker.x}
+            y={marker.y}
+            width={marker.width}
+            height={marker.height}
+            stroke="#22C55E"
+            strokeWidth={2 / viewport.zoom}
+            dash={[8 / viewport.zoom, 4 / viewport.zoom]}
+            fill="rgba(34, 197, 94, 0.08)"
+            cornerRadius={8 / viewport.zoom}
+          />
+          <Text
+            x={marker.x}
+            y={marker.y - (18 / viewport.zoom)}
+            text={autoLayoutDropPreview.label}
+            fontSize={11 / viewport.zoom}
+            fontFamily="Inter"
+            fill="#BBF7D0"
+          />
+        </Group>
+      );
+    }
+
+    const marker = autoLayoutDropPreview.marker;
+    const isVertical = marker.orientation === 'vertical';
+    const labelWidth = 96 / viewport.zoom;
+    const labelHeight = 18 / viewport.zoom;
+    const labelX = isVertical ? marker.x - labelWidth / 2 : marker.x;
+    const labelY = isVertical ? marker.y - (22 / viewport.zoom) : marker.y - (26 / viewport.zoom);
+
+    return (
+      <Group listening={false}>
+        <Line
+          points={isVertical
+            ? [marker.x, marker.y, marker.x, marker.y + marker.length]
+            : [marker.x, marker.y, marker.x + marker.length, marker.y]}
+          stroke="#22C55E"
+          strokeWidth={2.5 / viewport.zoom}
+          lineCap="round"
+          shadowColor="#22C55E"
+          shadowBlur={10 / viewport.zoom}
+          shadowOpacity={0.5}
+        />
+        <Circle
+          x={marker.x}
+          y={marker.y}
+          radius={3.5 / viewport.zoom}
+          fill="#22C55E"
+        />
+        <Circle
+          x={isVertical ? marker.x : marker.x + marker.length}
+          y={isVertical ? marker.y + marker.length : marker.y}
+          radius={3.5 / viewport.zoom}
+          fill="#22C55E"
+        />
+        <Group x={labelX} y={labelY}>
+          <Rect
+            width={labelWidth}
+            height={labelHeight}
+            fill="rgba(20, 83, 45, 0.92)"
+            stroke="#22C55E"
+            strokeWidth={1 / viewport.zoom}
+            cornerRadius={6 / viewport.zoom}
+          />
+          <Text
+            y={3 / viewport.zoom}
+            width={labelWidth}
+            text={autoLayoutDropPreview.label}
+            fontSize={10 / viewport.zoom}
+            fontFamily="Inter"
+            fill="#DCFCE7"
+            align="center"
+          />
+        </Group>
+      </Group>
+    );
   };
 
   const renderSingleNode = (node: SceneNode) => {
@@ -2607,13 +2744,17 @@ export const Canvas = () => {
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
           onContextMenu={handleCanvasContextMenu}
-          onMouseLeave={() => setDirectSelectHoverIds([])}
+          onMouseLeave={() => {
+            setDirectSelectHoverIds([]);
+            setAutoLayoutDropPreview(null);
+          }}
           onDblClick={(e) => tool === 'pen' && finalizePenPath()}
           draggable={false}
         >
           <Layer>
             {renderNodeHierarchy()}
             {renderDirectSelectHoverOutlines()}
+            {renderAutoLayoutDropPreview()}
 
             {/* Creation Preview */}
             {newNode && (

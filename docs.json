@@ -1,7 +1,8 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "Documentation",
+  "name": "Nova Design Engine",
+  "description": "Installable design engine toolkit with BYO LLM bindings, React editor components, parser utilities, and browser export helpers.",
   "colors": {
     "primary": "#0D9373"
   },
@@ -9,7 +10,26 @@
     "groups": [
       {
         "group": "Getting Started",
-        "pages": []
+        "pages": [
+          "index",
+          "getting-started/quickstart",
+          "getting-started/ai-bindings"
+        ]
+      },
+      {
+        "group": "Packages",
+        "pages": [
+          "react/editor-shell",
+          "integrations/adapters",
+          "integrations/browser-and-parser"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/core-toolkit",
+          "reference/presets"
+        ]
       }
     ]
   }

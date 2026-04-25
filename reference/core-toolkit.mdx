@@ -1,0 +1,50 @@
+---
+title: Core Toolkit
+description: Overview of the main exports from nova-design-engine.
+---
+
+# Core Toolkit
+
+The root `nova-design-engine` package is the main entrypoint for types, layout, orchestration, and editor bindings.
+
+## Core Types
+
+- `SceneNode`, `FrameNode`, `TextNode`, and related scene graph types.
+- `NovaLLMBinding`, `NovaTurnInput`, `NovaTurnResult`, and other AI turn types.
+
+## Layout And Geometry
+
+- `calculateLayout`
+- `getSuperellipsePath`
+- `measureText`
+- `performBooleanOperation`
+
+## Parsing And Export
+
+- `parseHTMLToNodes`
+- `exportToCode`
+- `exportToCss`
+- `exportNodesToCss`
+
+## Paths, Masks, And Framing
+
+- Path tooling helpers such as `parsePathData`, `serializePathData`, and `toggleAnchorCurve`.
+- Mask helpers including `buildMaskingRuns` and `maskNodeToCssClipPath`.
+- Framing helpers including `findInnermostFrameAtPoint`, `getGlobalPosition`, `getSelectionBounds`, and `wrapSelectionInFrame`.
+
+## AI Orchestration
+
+- `DEFAULT_NOVA_SYSTEM_PROMPT`
+- `nodesToHtmlContext`
+- `parseNovaResponse`
+- `parseAiTweaks`
+- `resolveGeneratedImageTokens`
+- `mergeGeneratedNodes`
+- `runNovaTurn`
+
+## Editor Host Helpers
+
+- `createNovaEditorBindings`
+- `applyNovaTurnToState`
+
+Use these helpers when your host application manages editor state and wants to apply AI turns consistently.

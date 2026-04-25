@@ -68,7 +68,9 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "docs:dev": "npx @mintlify/cli dev",
+    "docs:validate": "npx @mintlify/cli validate"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

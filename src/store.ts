@@ -396,6 +396,41 @@ const applyFrameSizingWithoutAutoLayout = (
     };
 };
 
+const reflowFrameBranch = (nodes: SceneNode[], frameId: string): SceneNode[] => {
+    const frame = getNodeById(nodes, frameId);
+    if (!frame || !isFrameLike(frame)) return nodes;
+
+    const children = nodes.filter((node) => node.parentId === frameId);
+    const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
+        ? calculateLayout(frame, children)
+        : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
+
+    const updatedChildrenMap = new Map(updatedChildren.map((child) => [child.id, child]));
+    const nextNodes = nodes.map((node) => {
+        if (node.id === updatedFrame.id) return updatedFrame;
+        return updatedChildrenMap.get(node.id) || node;
+    });
+
+    return updatedFrame.parentId ? reflowFrameBranch(nextNodes, updatedFrame.parentId) : nextNodes;
+};
+
+const reflowNodeBranch = (nodes: SceneNode[], targetId: string): SceneNode[] => {
+    const node = getNodeById(nodes, targetId);
+    if (!node) return nodes;
+
+    const frameId = isFrameLike(node) ? node.id : node.parentId;
+    if (!frameId) return nodes;
+
+    return reflowFrameBranch(nodes, frameId);
+};
+
+const reflowNodeBranches = (nodes: SceneNode[], targetIds: Array<string | undefined>): SceneNode[] => {
+    return Array.from(new Set(targetIds.filter((id): id is string => Boolean(id)))).reduce(
+        (currentNodes, targetId) => reflowNodeBranch(currentNodes, targetId),
+        nodes
+    );
+};
+
 interface DesignStore extends DesignState {
   setTool: (tool: ToolType) => void;
   setViewport: (viewport: Partial<Viewport>) => void;
@@ -626,42 +661,7 @@ export const useStore = create<DesignStore>((set, get) => ({
     }
 
         let newNodes = [...currentPage.nodes, nodeToInsert];
-
-    // Recursive Layout Trigger for New Node
-    const runLayoutRecursively = (targetId: string, nodes: SceneNode[]): SceneNode[] => {
-        const n = nodes.find(x => x.id === targetId);
-        if (!n) return nodes;
-
-        const frameId = isFrameLike(n) ? n.id : n.parentId;
-        if (!frameId) return nodes;
-
-        const frame = nodes.find(x => x.id === frameId);
-        if (frame && isFrameLike(frame)) {
-            const children = nodes.filter(x => x.parentId === frameId);
-            const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
-                ? calculateLayout(frame, children)
-                : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
-            
-            let nextNodes = nodes.map(x => {
-                if (x.id === updatedFrame.id) return updatedFrame;
-                const updatedChild = updatedChildren.find(uc => uc.id === x.id);
-                return updatedChild || x;
-            });
-
-            if (updatedFrame.parentId) {
-                return runLayoutRecursively(updatedFrame.parentId, nextNodes);
-            }
-            return nextNodes;
-        }
-        
-        if (n.parentId) {
-            return runLayoutRecursively(n.parentId, nodes);
-        }
-
-        return nodes;
-    };
-
-        newNodes = runLayoutRecursively(nodeToInsert.id, newNodes);
+        newNodes = reflowNodeBranch(newNodes, nodeToInsert.id);
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
         return { pages, selectedIds: [nodeToInsert.id] };
@@ -837,44 +837,7 @@ export const useStore = create<DesignStore>((set, get) => ({
         }
     }
     
-    // Recursive Auto Layout Trigger
-    const runLayoutRecursively = (targetId: string, nodes: SceneNode[]): SceneNode[] => {
-        const node = nodes.find(n => n.id === targetId);
-        if (!node) return nodes;
-
-        const frameId = isFrameLike(node) ? node.id : node.parentId;
-        if (!frameId) return nodes;
-
-        const frame = nodes.find(n => n.id === frameId);
-        if (frame && isFrameLike(frame)) {
-            const children = nodes.filter(n => n.parentId === frameId);
-            const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
-                ? calculateLayout(frame, children)
-                : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
-            
-            let nextNodes = nodes.map(n => {
-                if (n.id === updatedFrame.id) return updatedFrame;
-                const updatedChild = updatedChildren.find(uc => uc.id === n.id);
-                return updatedChild || n;
-            });
-
-            // If the frame itself changed (e.g., due to 'Hug'), propagate up to its parent
-            if (updatedFrame.parentId) {
-                return runLayoutRecursively(updatedFrame.parentId, nextNodes);
-            }
-            return nextNodes;
-        }
-        
-        // If node has parent but no layout on parent, maybe parent's parent has layout?
-        // Actually, Figma only reflows if parent has layout.
-        if (node.parentId) {
-            return runLayoutRecursively(node.parentId, nodes);
-        }
-
-        return nodes;
-    };
-
-    newNodes = runLayoutRecursively(id, newNodes);
+    newNodes = reflowNodeBranch(newNodes, id);
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
     return { pages };
@@ -1314,6 +1277,7 @@ export const useStore = create<DesignStore>((set, get) => ({
       let newNodes = [...currentPage.nodes];
       const dragNode = newNodes.find(n => n.id === dragId);
       if (!dragNode) return state;
+      const oldParentId = dragNode.parentId;
       const movingSubtreeIds = collectSubtreeIds(currentPage.nodes, dragId);
       const movingSubtree = currentPage.nodes.filter((node) => movingSubtreeIds.has(node.id));
       if (movingSubtree.length === 0) return state;
@@ -1394,6 +1358,7 @@ export const useStore = create<DesignStore>((set, get) => ({
 
       // 3. Insert subtree at new index.
       newNodes.splice(Math.min(newIndex, newNodes.length), 0, ...movedSubtree);
+      newNodes = reflowNodeBranches(newNodes, [oldParentId, newParentId]);
 
       const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
       return { pages };

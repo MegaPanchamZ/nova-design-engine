@@ -1,0 +1,34 @@
+---
+title: Presets
+description: Editor preset JSON files and typed preset exports.
+---
+
+# Presets
+
+Nova Design Engine ships a default editor preset and its schema so teams can standardize editor layout and tool configuration.
+
+## Shipped Files
+
+- `nova-design-engine/presets/default-editor-preset.json`
+- `nova-design-engine/presets/editor-preset.schema.json`
+
+## Typed Imports
+
+You can also consume the preset through code:
+
+```ts
+import {
+  defaultEditorPreset,
+  defaultEditorPresetJson,
+} from 'nova-design-engine/presets';
+```
+
+## Preset Types
+
+The main package exports these preset types:
+
+- `NovaEditorPreset`
+- `NovaEditorPanelPreset`
+- `NovaEditorToolPreset`
+
+Use the schema-backed JSON path when you want editable configuration files, and use the typed export when you want the default preset directly in code.

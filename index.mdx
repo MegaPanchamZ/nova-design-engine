@@ -1,0 +1,73 @@
+---
+title: Nova Design Engine
+description: Installable design engine primitives, editor UI, and BYO-LLM orchestration helpers.
+---
+
+# Nova Design Engine
+
+Nova Design Engine is an installable toolkit for building design editors, AI-assisted layout flows, and export pipelines without locking your app to one model provider.
+
+## What You Get
+
+- Core scene graph types and geometry/layout utilities.
+- AI turn orchestration through a provider-agnostic `NovaLLMBinding` interface.
+- Prebuilt React editor components from `nova-design-engine/react`.
+- Browser-only export helpers from `nova-design-engine/browser`.
+- Parser-safe imports from `nova-design-engine/parser`.
+- Official adapters for OpenAI and Google GenAI.
+
+## Install
+
+```bash
+npm install nova-design-engine
+```
+
+If you plan to render the editor UI, install `react` and `react-dom` in the host app as well.
+
+## Choose A Starting Point
+
+- Use the [Quickstart](/getting-started/quickstart) page if you want the shortest path from install to a working turn.
+- Use [AI Bindings](/getting-started/ai-bindings) if you need a server-backed `NovaLLMBinding`.
+- Use [React Editor Shell](/react/editor-shell) if you want the packaged editor UI.
+- Use [Adapters](/integrations/adapters) if you want an official provider integration.
+
+## Minimal Example
+
+```ts
+import { runNovaTurn, type NovaLLMBinding } from 'nova-design-engine';
+
+const binding: NovaLLMBinding = {
+  async complete(input) {
+    return '[MESSAGE]Ready[/MESSAGE][HTML]<div id="root"></div>[/HTML][TWEAKS][][/TWEAKS]';
+  },
+  async generateImage(prompt) {
+    return '';
+  },
+};
+
+const result = await runNovaTurn(binding, {
+  prompt: 'Create a modern pricing card',
+  history: [],
+  contextNodes: [],
+  selectedIds: [],
+  basePosition: { x: 80, y: 80 },
+});
+```
+
+## Security Model
+
+Keep provider API keys out of browser code. The React package does not read `NEXT_PUBLIC_*` secrets, and `NovaAI` stays disabled until your app explicitly supplies a secure binding.
+
+## Local Preview
+
+Mintlify can preview this site locally from the repository root:
+
+```bash
+npx @mintlify/cli dev
+```
+
+To validate the docs configuration:
+
+```bash
+npx @mintlify/cli doctor
+```
