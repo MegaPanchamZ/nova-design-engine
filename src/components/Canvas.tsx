@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer } from 'react-konva';
+import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer, Arrow } from 'react-konva';
 import useImage from 'use-image';
 import { useStore } from '../store';
 import { createDefaultNode, Effect, FrameNode, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
@@ -24,6 +24,7 @@ import type { DrawingToolType } from '../lib/toolRegistry';
 import { computeViewportForZoomBox, getSelectableHitStack, normalizeCanvasRect, resolveDirectSelectCycle } from '../lib/toolSemantics';
 import type { DirectSelectCycleState } from '../lib/toolSemantics';
 import { AutoLayoutDropPreview, getAutoLayoutDropPreview } from '../lib/autoLayoutDrop';
+import { buildPrototypeNoodlePoints, collectPrototypeConnections, isPrototypeTargetNode, upsertPrototypeNavigation } from '../lib/prototypeNoodles';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
@@ -35,6 +36,17 @@ interface ContextMenuState {
   y: number;
   canvasX: number;
   canvasY: number;
+}
+
+interface PathAnchorSelection {
+  nodeId: string;
+  index: number;
+}
+
+interface PrototypeConnectionDraft {
+  sourceId: string;
+  pointer: { x: number; y: number };
+  targetId: string | null;
 }
 
 interface KonvaImageProps {
@@ -170,7 +182,8 @@ export const Canvas = () => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setTool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
-    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables, moveNodeHierarchy
+    deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables, moveNodeHierarchy,
+    undo, redo
   } = useStore();
   
   const currentPage = pages.find(p => p.id === currentPageId);
@@ -180,6 +193,7 @@ export const Canvas = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
   const directSelectCycleRef = useRef<DirectSelectCycleState | null>(null);
+  const viewportAnimationRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1280,
     height: typeof window !== 'undefined' ? window.innerHeight : 720,
@@ -203,8 +217,10 @@ export const Canvas = () => {
   const [zoomRect, setZoomRect] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
   const [directSelectHoverIds, setDirectSelectHoverIds] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [selectedPathAnchor, setSelectedPathAnchor] = useState<{ nodeId: string; index: number } | null>(null);
+  const [selectedPathAnchor, setSelectedPathAnchor] = useState<PathAnchorSelection | null>(null);
+  const [selectedPathAnchors, setSelectedPathAnchors] = useState<PathAnchorSelection[]>([]);
   const [autoLayoutDropPreview, setAutoLayoutDropPreview] = useState<AutoLayoutDropPreview | null>(null);
+  const [prototypeConnectionDraft, setPrototypeConnectionDraft] = useState<PrototypeConnectionDraft | null>(null);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
@@ -229,15 +245,40 @@ export const Canvas = () => {
   }, [canvasCursor]);
 
   useEffect(() => {
+    return () => {
+      if (viewportAnimationRef.current !== null) {
+        cancelAnimationFrame(viewportAnimationRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (tool !== 'direct-select') {
       directSelectCycleRef.current = null;
       setDirectSelectHoverIds([]);
+      setSelectedPathAnchor(null);
+      setSelectedPathAnchors([]);
     }
   }, [tool]);
+
+  const setPathAnchorSelection = (anchors: PathAnchorSelection[]) => {
+    setSelectedPathAnchors(anchors);
+    setSelectedPathAnchor(anchors[0] || null);
+  };
+
+  const clearPathAnchorSelection = () => {
+    setPathAnchorSelection([]);
+  };
+
+  const isPathAnchorSelected = (nodeId: string, index: number) => {
+    return selectedPathAnchors.some((anchor) => anchor.nodeId === nodeId && anchor.index === index);
+  };
 
   useEffect(() => {
     if (mode === 'prototype') {
       setAutoLayoutDropPreview(null);
+    } else {
+      setPrototypeConnectionDraft(null);
     }
   }, [mode]);
 
@@ -281,6 +322,22 @@ export const Canvas = () => {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+        const isUndoModifier = (e.metaKey || e.ctrlKey) && !e.altKey;
+        const normalizedKey = e.key.toLowerCase();
+
+        if (!isTypingFieldFocused() && isUndoModifier && normalizedKey === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) redo();
+          else undo();
+          return;
+        }
+
+        if (!isTypingFieldFocused() && isUndoModifier && normalizedKey === 'y') {
+          e.preventDefault();
+          redo();
+          return;
+        }
+
         if (e.key === 'Alt') setAltHeld(true);
         if (!isTypingFieldFocused() && e.code === 'Space') {
           e.preventDefault();
@@ -292,7 +349,7 @@ export const Canvas = () => {
           if (shortcutTool) {
             e.preventDefault();
             if (shortcutTool !== 'pen' && penPoints.length > 0) setPenPoints([]);
-            setSelectedPathAnchor(null);
+            clearPathAnchorSelection();
             setTool(shortcutTool);
             return;
           }
@@ -358,33 +415,54 @@ export const Canvas = () => {
           setSnapLines([]);
         }
 
-        pushHistory();
+        pushHistory('nudge');
         return;
       }
 
       if (e.key === 'Escape') {
         setContextMenu(null);
-        setSelectedPathAnchor(null);
+        clearPathAnchorSelection();
         directSelectCycleRef.current = null;
+        setPrototypeConnectionDraft(null);
         if (penPoints.length > 0) {
           setPenPoints([]);
         }
       }
 
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPathAnchor) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedPathAnchors.length > 0 || selectedPathAnchor)) {
         e.preventDefault();
-        const node = nodes.find((entry) => entry.id === selectedPathAnchor.nodeId);
-        if (node && node.type === 'path') {
+        const anchorsToDelete = selectedPathAnchors.length > 0
+          ? selectedPathAnchors
+          : selectedPathAnchor
+            ? [selectedPathAnchor]
+            : [];
+        const groupedByNode = new Map<string, number[]>();
+
+        anchorsToDelete.forEach((anchor) => {
+          const nextIndices = groupedByNode.get(anchor.nodeId) || [];
+          nextIndices.push(anchor.index);
+          groupedByNode.set(anchor.nodeId, nextIndices);
+        });
+
+        groupedByNode.forEach((indices, nodeId) => {
+          const node = nodes.find((entry) => entry.id === nodeId);
+          if (!node || node.type !== 'path') return;
+
           const parsed = parsePathData(node.data);
           const anchors = [...parsed.anchors];
-          if (anchors.length > 2 && selectedPathAnchor.index >= 0 && selectedPathAnchor.index < anchors.length) {
-            anchors.splice(selectedPathAnchor.index, 1);
-            const shouldClose = parsed.closed && anchors.length >= 3;
-            updateNode(node.id, { data: serializePathData(anchors, shouldClose) });
-            pushHistory();
-          }
-        }
-        setSelectedPathAnchor(null);
+          const uniqueDescending = Array.from(new Set(indices)).sort((left, right) => right - left);
+          if (anchors.length - uniqueDescending.length < 2) return;
+
+          uniqueDescending.forEach((index) => {
+            if (index >= 0 && index < anchors.length) anchors.splice(index, 1);
+          });
+
+          const shouldClose = parsed.closed && anchors.length >= 3;
+          updateNode(node.id, { data: serializePathData(anchors, shouldClose) });
+        });
+
+        pushHistory('path-edit');
+        clearPathAnchorSelection();
         return;
       }
 
@@ -393,8 +471,8 @@ export const Canvas = () => {
           e.preventDefault();
           deleteNodes(selectedIds);
           setSelectedIds([]);
-          setSelectedPathAnchor(null);
-          pushHistory();
+          clearPathAnchorSelection();
+          pushHistory('delete');
         }
       }
     };
@@ -408,7 +486,7 @@ export const Canvas = () => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [deleteNodes, editingId, mode, nodes, penPoints.length, pushHistory, selectedIds, selectedPathAnchor, setSnapLines, setTool, updateNode, viewport.zoom]);
+  }, [clearPathAnchorSelection, deleteNodes, editingId, mode, nodes, penPoints.length, pushHistory, redo, selectedIds, selectedPathAnchor, selectedPathAnchors, setSnapLines, setTool, undo, updateNode, viewport.zoom]);
 
   // Tool Tool Handlers
 
@@ -435,8 +513,8 @@ export const Canvas = () => {
     if (!result) return;
 
     updateNode(nodeId, { data: serializePathData(result.anchors, parsed.closed) });
-    setSelectedPathAnchor({ nodeId, index: result.insertionIndex });
-    pushHistory();
+    setPathAnchorSelection([{ nodeId, index: result.insertionIndex }]);
+    pushHistory('path-edit');
   };
 
   const zoomToFitSelected = () => {
@@ -489,10 +567,35 @@ export const Canvas = () => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node || node.type !== 'path') return;
 
+    const parsed = parsePathData(node.data);
     const pointer = getPointerPosition();
     const globalPos = getGlobalPosition(nodeId);
     const nextX = pointer.x - globalPos.x;
     const nextY = pointer.y - globalPos.y;
+
+    const selectedAnchorsInNode = selectedPathAnchors.filter((anchor) => anchor.nodeId === nodeId);
+    if (selectedAnchorsInNode.length > 1 && selectedAnchorsInNode.some((anchor) => anchor.index === index)) {
+      const activeAnchor = parsed.anchors[index];
+      if (!activeAnchor) return;
+
+      const deltaX = nextX - activeAnchor.x;
+      const deltaY = nextY - activeAnchor.y;
+      updatePathAnchors(nodeId, (anchors) => {
+        selectedAnchorsInNode.forEach((selection) => {
+          const targetAnchor = anchors[selection.index];
+          if (!targetAnchor) return;
+          targetAnchor.x += deltaX;
+          targetAnchor.y += deltaY;
+          if (targetAnchor.cpIn) {
+            targetAnchor.cpIn = { x: targetAnchor.cpIn.x + deltaX, y: targetAnchor.cpIn.y + deltaY };
+          }
+          if (targetAnchor.cpOut) {
+            targetAnchor.cpOut = { x: targetAnchor.cpOut.x + deltaX, y: targetAnchor.cpOut.y + deltaY };
+          }
+        });
+      });
+      return;
+    }
 
     updatePathAnchors(nodeId, (anchors) => {
       const next = moveAnchorWithHandles(anchors, index, { x: nextX, y: nextY });
@@ -524,8 +627,8 @@ export const Canvas = () => {
     const anchors = [...parsed.anchors];
     const toggled = toggleAnchorCurve(anchors, index);
     updateNode(nodeId, { data: serializePathData(toggled, parsed.closed) });
-    setSelectedPathAnchor({ nodeId, index });
-    pushHistory();
+    setPathAnchorSelection([{ nodeId, index }]);
+    pushHistory('path-edit');
   };
 
   const filterTopLevelSelection = (ids: string[]): string[] => {
@@ -627,6 +730,81 @@ export const Canvas = () => {
     return { x: parentPos.x + node.x, y: parentPos.y + node.y };
   };
 
+  const getGlobalRect = (nodeId: string) => {
+    const node = nodes.find((entry) => entry.id === nodeId);
+    if (!node) return null;
+    const global = getGlobalPosition(nodeId);
+    return { x: global.x, y: global.y, width: node.width, height: node.height };
+  };
+
+  const stopViewportAnimation = () => {
+    if (viewportAnimationRef.current !== null) {
+      cancelAnimationFrame(viewportAnimationRef.current);
+      viewportAnimationRef.current = null;
+    }
+  };
+
+  const animateViewportTo = (nextViewport: { x: number; y: number; zoom: number }, animation: 'instant' | 'slide-in' | 'dissolve' = 'slide-in') => {
+    stopViewportAnimation();
+
+    if (animation === 'instant') {
+      setViewport(nextViewport);
+      return;
+    }
+
+    const duration = animation === 'dissolve' ? 220 : 280;
+    const start = performance.now();
+    const initialViewport = { ...viewport };
+
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setViewport({
+        x: initialViewport.x + (nextViewport.x - initialViewport.x) * eased,
+        y: initialViewport.y + (nextViewport.y - initialViewport.y) * eased,
+        zoom: initialViewport.zoom + (nextViewport.zoom - initialViewport.zoom) * eased,
+      });
+
+      if (progress < 1) {
+        viewportAnimationRef.current = requestAnimationFrame(tick);
+      } else {
+        viewportAnimationRef.current = null;
+      }
+    };
+
+    viewportAnimationRef.current = requestAnimationFrame(tick);
+  };
+
+  const focusPrototypeTarget = (targetId: string, animation: 'instant' | 'slide-in' | 'dissolve' = 'slide-in') => {
+    const targetNode = nodes.find((entry) => entry.id === targetId);
+    if (!targetNode || !isPrototypeTargetNode(targetNode)) return;
+
+    const global = getGlobalPosition(targetNode.id);
+    const padding = 96;
+    const zoomX = (dimensions.width - padding * 2) / Math.max(1, targetNode.width);
+    const zoomY = (dimensions.height - padding * 2) / Math.max(1, targetNode.height);
+    const nextZoom = Math.max(0.2, Math.min(2.5, Math.min(zoomX, zoomY)));
+    const nextViewport = {
+      zoom: nextZoom,
+      x: dimensions.width / 2 - (global.x + targetNode.width / 2) * nextZoom,
+      y: dimensions.height / 2 - (global.y + targetNode.height / 2) * nextZoom,
+    };
+
+    animateViewportTo(nextViewport, animation);
+  };
+
+  const findPrototypeTargetAtPoint = (point: { x: number; y: number }, excludeId?: string): string | undefined => {
+    const candidates = nodes
+      .filter((node) => isPrototypeTargetNode(node) && node.id !== excludeId)
+      .filter((node) => {
+        const global = getGlobalPosition(node.id);
+        return point.x >= global.x && point.x <= global.x + node.width && point.y >= global.y && point.y <= global.y + node.height;
+      })
+      .sort((left, right) => (left.width * left.height) - (right.width * right.height));
+
+    return candidates[0]?.id;
+  };
+
   const evaluateInteractionCondition = (condition: Interaction['condition']) => {
     if (!condition) return true;
 
@@ -669,6 +847,8 @@ export const Canvas = () => {
 
           if (targetId && pages.some((page) => page.id === targetId)) {
             useStore.getState().setPage(targetId);
+          } else if (targetId) {
+            focusPrototypeTarget(targetId, action.animation || 'slide-in');
           }
           return;
         }
@@ -887,6 +1067,7 @@ export const Canvas = () => {
         setNewNode(node);
         setIsDrawing(true);
         setSelectedIds([]);
+        clearPathAnchorSelection();
         
         // Also start selection marquee in case they drag
         setSelectionRect({ x, y, width: 0, height: 0 });
@@ -914,12 +1095,12 @@ export const Canvas = () => {
             setSelectionRect({ x, y, width: 0, height: 0 });
             setSelectedIds([]);
           directSelectCycleRef.current = null;
-          setSelectedPathAnchor(null);
+          clearPathAnchorSelection();
         } else if (clickedFrame) {
             if (e.evt.shiftKey) setSelectedIds(Array.from(new Set([...selectedIds, clickedFrame.id])));
             else setSelectedIds([clickedFrame.id]);
           directSelectCycleRef.current = null;
-          setSelectedPathAnchor(null);
+          clearPathAnchorSelection();
         }
       }
       return;
@@ -929,6 +1110,16 @@ export const Canvas = () => {
   const handleMouseMove = (e: CanvasMouseEvent) => {
     const stage = stageRef.current;
     if (!stage) return;
+
+    if (prototypeConnectionDraft) {
+      const pointer = getPointerPosition();
+      setPrototypeConnectionDraft({
+        sourceId: prototypeConnectionDraft.sourceId,
+        pointer,
+        targetId: findPrototypeTargetAtPoint(pointer, prototypeConnectionDraft.sourceId) || null,
+      });
+      return;
+    }
 
     if (isPanning) {
         if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
@@ -1037,6 +1228,22 @@ export const Canvas = () => {
         setIsPenDragging(false);
     }
 
+    if (prototypeConnectionDraft) {
+      const { sourceId, targetId } = prototypeConnectionDraft;
+      if (targetId && targetId !== sourceId) {
+        const sourceNode = nodes.find((entry) => entry.id === sourceId);
+        if (sourceNode) {
+          updateNode(sourceId, {
+            interactions: upsertPrototypeNavigation(sourceNode.interactions, targetId, 'slide-in'),
+          });
+          setSelectedIds([sourceId]);
+          pushHistory('prototype-link');
+        }
+      }
+      setPrototypeConnectionDraft(null);
+      return;
+    }
+
     if (zoomRect) {
       const normalizedZoomRect = normalizeCanvasRect(zoomRect);
       const clickThreshold = 8 / viewport.zoom;
@@ -1098,6 +1305,31 @@ export const Canvas = () => {
         height: Math.abs(selectionRect.height)
       };
 
+      if (tool === 'direct-select') {
+        const boxRight = box.x + box.width;
+        const boxBottom = box.y + box.height;
+        const anchorHits: PathAnchorSelection[] = [];
+
+        nodes.forEach((node) => {
+          if (node.type !== 'path') return;
+          const globalPos = getGlobalPosition(node.id);
+          parsePathData(node.data).anchors.forEach((anchor, index) => {
+            const anchorX = globalPos.x + anchor.x;
+            const anchorY = globalPos.y + anchor.y;
+            if (anchorX >= box.x && anchorX <= boxRight && anchorY >= box.y && anchorY <= boxBottom) {
+              anchorHits.push({ nodeId: node.id, index });
+            }
+          });
+        });
+
+        if (anchorHits.length > 0) {
+          setSelectedIds(Array.from(new Set(anchorHits.map((anchor) => anchor.nodeId))));
+          setPathAnchorSelection(anchorHits);
+          setSelectionRect(null);
+          return;
+        }
+      }
+
       const hits = nodes.filter(node => {
         const globalPos = getGlobalPosition(node.id);
         const nodeX = globalPos.x;
@@ -1117,6 +1349,7 @@ export const Canvas = () => {
       }).map(n => n.id);
 
       setSelectedIds(hits);
+      clearPathAnchorSelection();
       setSelectionRect(null);
     }
   };
@@ -1216,7 +1449,7 @@ export const Canvas = () => {
   const handleTextKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       updateNode(editingId!, { text: editingText });
-      pushHistory();
+      pushHistory('text-edit');
       setEditingId(null);
       setEditingHeight(null);
     }
@@ -1754,7 +1987,7 @@ export const Canvas = () => {
             } else {
               setSelectedIds([cycle.node.id]);
             }
-            setSelectedPathAnchor(null);
+            clearPathAnchorSelection();
             return;
           }
         }
@@ -1764,7 +1997,7 @@ export const Canvas = () => {
         } else {
           setSelectedIds([node.id]);
         }
-        setSelectedPathAnchor(null);
+        clearPathAnchorSelection();
       },
       onDblClick: () => handleTextDblClick(node),
       onMouseEnter: () => {
@@ -2395,7 +2628,7 @@ export const Canvas = () => {
                         evt.cancelBubble = true;
                       }}
                       onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'in', evt)}
-                      onDragEnd={() => pushHistory()}
+                      onDragEnd={() => pushHistory('path-edit')}
                     />
                   );
                 }
@@ -2425,7 +2658,7 @@ export const Canvas = () => {
                         evt.cancelBubble = true;
                       }}
                       onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'out', evt)}
-                      onDragEnd={() => pushHistory()}
+                      onDragEnd={() => pushHistory('path-edit')}
                     />
                   );
                 }
@@ -2436,20 +2669,33 @@ export const Canvas = () => {
                 x={anchorX}
                 y={anchorY}
                         radius={4 / viewport.zoom}
-                        fill={selectedPathAnchor?.nodeId === node.id && selectedPathAnchor.index === idx ? '#6366F1' : '#FFFFFF'}
+                        fill={isPathAnchorSelected(node.id, idx) ? '#6366F1' : '#FFFFFF'}
                         stroke="#6366F1"
                         strokeWidth={1 / viewport.zoom}
                         draggable
                         onMouseDown={(evt) => {
                           evt.cancelBubble = true;
-                          setSelectedPathAnchor({ nodeId: node.id, index: idx });
+                          if (evt.evt.shiftKey) {
+                            const alreadySelected = isPathAnchorSelected(node.id, idx);
+                            const nextSelection = alreadySelected
+                              ? selectedPathAnchors.filter((anchor) => !(anchor.nodeId === node.id && anchor.index === idx))
+                              : [...selectedPathAnchors, { nodeId: node.id, index: idx }];
+                            setPathAnchorSelection(nextSelection);
+                            return;
+                          }
+
+                          if (!isPathAnchorSelected(node.id, idx) || selectedPathAnchors.length <= 1) {
+                            setPathAnchorSelection([{ nodeId: node.id, index: idx }]);
+                          } else {
+                            setSelectedPathAnchor({ nodeId: node.id, index: idx });
+                          }
                         }}
                         onDblClick={(evt) => {
                           evt.cancelBubble = true;
                           togglePathAnchorMode(node.id, idx);
                         }}
                         onDragMove={() => handlePointDragMove(node.id, idx)}
-                        onDragEnd={() => pushHistory()}
+                        onDragEnd={() => pushHistory('path-edit')}
                     />
                 );
             }
@@ -2707,6 +2953,140 @@ export const Canvas = () => {
       });
   };
 
+  const renderPrototypeNoodles = () => {
+    if (mode !== 'prototype') return null;
+
+    return collectPrototypeConnections(nodes)
+      .map((connection) => {
+        const sourceRect = getGlobalRect(connection.sourceId);
+        const targetRect = getGlobalRect(connection.targetId);
+        if (!sourceRect || !targetRect) return null;
+
+        return {
+          connection,
+          points: buildPrototypeNoodlePoints(sourceRect, targetRect),
+        };
+      })
+      .filter((entry): entry is { connection: ReturnType<typeof collectPrototypeConnections>[number]; points: number[] } => Boolean(entry))
+      .map(({ connection, points }) => (
+        <Group key={`prototype-noodle-${connection.interactionId}-${connection.actionIndex}`} listening={false}>
+          <Arrow
+            points={points}
+            stroke="#F59E0B"
+            fill="#F59E0B"
+            strokeWidth={2 / viewport.zoom}
+            pointerLength={10 / viewport.zoom}
+            pointerWidth={9 / viewport.zoom}
+            tension={0.45}
+            opacity={0.9}
+            dash={connection.trigger === 'onHover' ? [8 / viewport.zoom, 6 / viewport.zoom] : undefined}
+          />
+          <Text
+            x={(points[2] + points[4]) / 2 - 28 / viewport.zoom}
+            y={(points[3] + points[5]) / 2 - 18 / viewport.zoom}
+            width={56 / viewport.zoom}
+            text={connection.trigger.replace('on', '')}
+            fontSize={10 / viewport.zoom}
+            align="center"
+            fill="#FCD34D"
+            listening={false}
+          />
+        </Group>
+      ));
+  };
+
+  const renderPrototypeDraft = () => {
+    if (mode !== 'prototype' || !prototypeConnectionDraft) return null;
+
+    const sourceRect = getGlobalRect(prototypeConnectionDraft.sourceId);
+    if (!sourceRect) return null;
+
+    const targetRect = prototypeConnectionDraft.targetId
+      ? getGlobalRect(prototypeConnectionDraft.targetId)
+      : { x: prototypeConnectionDraft.pointer.x, y: prototypeConnectionDraft.pointer.y, width: 1, height: 1 };
+    if (!targetRect) return null;
+
+    const points = buildPrototypeNoodlePoints(sourceRect, targetRect);
+
+    return (
+      <Group listening={false}>
+        <Arrow
+          points={points}
+          stroke="#FB7185"
+          fill="#FB7185"
+          strokeWidth={2 / viewport.zoom}
+          pointerLength={10 / viewport.zoom}
+          pointerWidth={9 / viewport.zoom}
+          tension={0.45}
+          dash={[10 / viewport.zoom, 6 / viewport.zoom]}
+        />
+        {prototypeConnectionDraft.targetId && (() => {
+          const hoveredRect = getGlobalRect(prototypeConnectionDraft.targetId!);
+          if (!hoveredRect) return null;
+          return (
+            <Rect
+              x={hoveredRect.x}
+              y={hoveredRect.y}
+              width={hoveredRect.width}
+              height={hoveredRect.height}
+              stroke="#FB7185"
+              strokeWidth={2 / viewport.zoom}
+              dash={[8 / viewport.zoom, 4 / viewport.zoom]}
+              fillEnabled={false}
+            />
+          );
+        })()}
+      </Group>
+    );
+  };
+
+  const renderPrototypeHandles = () => {
+    if (mode !== 'prototype' || prototypeConnectionDraft) return null;
+
+    return filterTopLevelSelection(selectedIds)
+      .map((id) => nodes.find((node) => node.id === id))
+      .filter((node): node is SceneNode => Boolean(node) && isPrototypeTargetNode(node!))
+      .map((node) => {
+        const rect = getGlobalRect(node.id);
+        if (!rect) return null;
+
+        return (
+          <Group key={`prototype-handle-${node.id}`}>
+            <Circle
+              x={rect.x + rect.width + 18 / viewport.zoom}
+              y={rect.y + rect.height / 2}
+              radius={10 / viewport.zoom}
+              fill="#111827"
+              stroke="#F59E0B"
+              strokeWidth={2 / viewport.zoom}
+              onMouseDown={(event) => {
+                event.cancelBubble = true;
+                setPrototypeConnectionDraft({
+                  sourceId: node.id,
+                  pointer: getPointerPosition(),
+                  targetId: null,
+                });
+              }}
+            />
+            <Arrow
+              points={[
+                rect.x + rect.width - 6 / viewport.zoom,
+                rect.y + rect.height / 2,
+                rect.x + rect.width + 10 / viewport.zoom,
+                rect.y + rect.height / 2,
+              ]}
+              stroke="#F59E0B"
+              fill="#F59E0B"
+              strokeWidth={2 / viewport.zoom}
+              pointerLength={8 / viewport.zoom}
+              pointerWidth={7 / viewport.zoom}
+              listening={false}
+            />
+          </Group>
+        );
+      });
+  };
+
   return (
     <div
       id="canvas-container"
@@ -2752,7 +3132,10 @@ export const Canvas = () => {
           draggable={false}
         >
           <Layer>
+            {renderPrototypeNoodles()}
             {renderNodeHierarchy()}
+            {renderPrototypeDraft()}
+            {renderPrototypeHandles()}
             {renderDirectSelectHoverOutlines()}
             {renderAutoLayoutDropPreview()}
 

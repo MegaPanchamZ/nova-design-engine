@@ -17,8 +17,57 @@ let clipboardSnapshot: ClipboardSnapshot | null = null;
 let pasteNudgeCount = 0;
 const MAX_CANVAS_COORD = 1_000_000;
 const MAX_CANVAS_SIZE = 1_000_000;
+const HISTORY_LIMIT = 50;
+const HISTORY_MERGE_WINDOW_MS = 600;
+const INSTANCE_OVERRIDE_EXCLUDED_KEYS = new Set([
+    'id',
+    'type',
+    'parentId',
+    'masterId',
+    'variantGroupId',
+    'variantName',
+    'instanceOverrides',
+]);
 
 const deepClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+let lastHistoryCommit: { source: string; timestamp: number } | null = null;
+
+const resetHistoryCommit = () => {
+    lastHistoryCommit = null;
+};
+
+const cloneValue = <T,>(value: T): T => {
+    if (typeof structuredClone === 'function') return structuredClone(value);
+    return deepClone(value);
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+
+const getDynamicNodeValue = (node: SceneNode | undefined, key: string): unknown => {
+    if (!node) return undefined;
+    return (node as unknown as Record<string, unknown>)[key];
+};
+
+const areValuesEqual = (left: unknown, right: unknown): boolean => {
+    if (Object.is(left, right)) return true;
+
+    if (Array.isArray(left) && Array.isArray(right)) {
+        if (left.length !== right.length) return false;
+        return left.every((item, index) => areValuesEqual(item, right[index]));
+    }
+
+    if (isRecord(left) && isRecord(right)) {
+        const leftKeys = Object.keys(left);
+        const rightKeys = Object.keys(right);
+        if (leftKeys.length !== rightKeys.length) return false;
+        return leftKeys.every((key) => areValuesEqual(left[key], right[key]));
+    }
+
+    return false;
+};
 
 const sanitizeCoordinate = (value: number, fallback = 0): number => {
     if (!Number.isFinite(value)) return fallback;
@@ -103,6 +152,186 @@ const deriveConvenienceColorFromPaints = (paints: Paint[] | undefined, fallback:
     }
 
     return fallback;
+};
+
+const applyNodePatch = (baseNode: SceneNode, patch: Partial<SceneNode>): SceneNode => {
+    let updated = { ...baseNode, ...patch } as SceneNode;
+
+    if (patch.fill !== undefined && patch.fills === undefined) {
+        const targetColor = String(patch.fill);
+        const nextFills: Paint[] = (updated.fills && updated.fills.length > 0)
+            ? updated.fills.map((paint) => ({ ...paint }))
+            : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: updated.opacity || 1, visible: true }];
+
+        let applied = false;
+        for (let index = nextFills.length - 1; index >= 0; index -= 1) {
+            if (nextFills[index].type === 'solid') {
+                nextFills[index] = { ...nextFills[index], color: targetColor };
+                applied = true;
+                break;
+            }
+        }
+
+        if (!applied) {
+            nextFills.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
+        }
+
+        updated.fills = nextFills;
+    }
+
+    if (patch.stroke !== undefined && patch.strokes === undefined) {
+        const targetColor = String(patch.stroke);
+        const nextStrokes: Paint[] = (updated.strokes && updated.strokes.length > 0)
+            ? updated.strokes.map((paint) => ({ ...paint }))
+            : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true }];
+
+        let applied = false;
+        for (let index = nextStrokes.length - 1; index >= 0; index -= 1) {
+            if (nextStrokes[index].type === 'solid') {
+                nextStrokes[index] = { ...nextStrokes[index], color: targetColor };
+                applied = true;
+                break;
+            }
+        }
+
+        if (!applied) {
+            nextStrokes.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
+        }
+
+        updated.strokes = nextStrokes;
+    }
+
+    if (patch.fills !== undefined) {
+        updated.fills = sanitizePaintCollection(updated.fills, updated.fill || '#D9D9D9');
+        updated.fill = deriveConvenienceColorFromPaints(updated.fills, 'transparent');
+    }
+
+    if (patch.strokes !== undefined) {
+        updated.strokes = sanitizePaintCollection(updated.strokes, updated.stroke || '#000000');
+        updated.stroke = deriveConvenienceColorFromPaints(updated.strokes, updated.stroke || '#000000');
+    }
+
+    const textUpdates = patch as Partial<TextNode>;
+    if (textUpdates.text !== undefined && updated.isAutoName) {
+        updated.name = textUpdates.text || 'Text';
+    }
+
+    updated = sanitizeNodeGeometry(updated, baseNode);
+    if (patch.name !== undefined && typeof patch.name === 'string') {
+        if (patch.name.trim() === '') {
+            updated.isAutoName = true;
+            if (updated.type === 'text') updated.name = updated.text || 'Text';
+        } else {
+            updated.isAutoName = false;
+        }
+    }
+
+    if (updated.type === 'text') {
+        const textNode = updated as TextNode;
+        const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill') ? textNode.width : undefined;
+        const metrics = measureText(textNode.text, textNode.fontSize, textNode.fontFamily, maxWidth, textNode.lineHeight);
+
+        if (textNode.horizontalResizing === 'hug') updated.width = metrics.width;
+        if (textNode.verticalResizing === 'hug') updated.height = metrics.height;
+    }
+
+    return updated;
+};
+
+const sanitizeInstanceOverrides = (
+    overrides: Record<string, unknown> | undefined,
+    masterNode: SceneNode | undefined
+): Record<string, unknown> | undefined => {
+    if (!overrides) return undefined;
+
+    const nextOverrides = Object.entries(overrides).reduce<Record<string, unknown>>((acc, [key, value]) => {
+        if (INSTANCE_OVERRIDE_EXCLUDED_KEYS.has(key)) return acc;
+        const masterValue = getDynamicNodeValue(masterNode, key);
+        if (masterNode && areValuesEqual(value, masterValue)) return acc;
+        acc[key] = cloneValue(value);
+        return acc;
+    }, {});
+
+    return Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined;
+};
+
+const buildInstanceOverrideRecord = (
+    instanceNode: SceneNode,
+    patch: Partial<SceneNode>,
+    masterNode: SceneNode | undefined
+): Record<string, unknown> | undefined => {
+    const currentOverrides = isRecord(instanceNode.instanceOverrides)
+        ? cloneValue(instanceNode.instanceOverrides)
+        : {};
+
+    Object.keys(patch).forEach((key) => {
+        if (INSTANCE_OVERRIDE_EXCLUDED_KEYS.has(key)) return;
+        const nextValue = cloneValue(getDynamicNodeValue(instanceNode, key));
+        const masterValue = getDynamicNodeValue(masterNode, key);
+        if (masterNode && areValuesEqual(nextValue, masterValue)) {
+            delete currentOverrides[key];
+            return;
+        }
+        currentOverrides[key] = nextValue;
+    });
+
+    return Object.keys(currentOverrides).length > 0 ? currentOverrides : undefined;
+};
+
+const reapplyInstanceOverrides = (instanceNode: SceneNode, masterNode: SceneNode | undefined): SceneNode => {
+    const sanitizedOverrides = sanitizeInstanceOverrides(
+        isRecord(instanceNode.instanceOverrides) ? instanceNode.instanceOverrides : undefined,
+        masterNode
+    );
+
+    if (!sanitizedOverrides) {
+        return instanceNode.instanceOverrides ? { ...instanceNode, instanceOverrides: undefined } : instanceNode;
+    }
+
+    const mergedNode = applyNodePatch({ ...instanceNode, instanceOverrides: undefined } as SceneNode, sanitizedOverrides as Partial<SceneNode>);
+    return { ...mergedNode, instanceOverrides: sanitizedOverrides };
+};
+
+const getRelativeNodePath = (nodes: SceneNode[], rootId: string, nodeId: string): string => {
+    if (rootId === nodeId) return 'root';
+
+    const segments: number[] = [];
+    let currentNode = getNodeById(nodes, nodeId);
+    while (currentNode && currentNode.id !== rootId) {
+        const siblings = nodes.filter((node) => node.parentId === currentNode?.parentId);
+        const siblingIndex = siblings.findIndex((node) => node.id === currentNode?.id);
+        segments.unshift(Math.max(0, siblingIndex));
+        currentNode = getNodeById(nodes, currentNode.parentId);
+    }
+
+    return currentNode?.id === rootId ? segments.join('.') : nodeId;
+};
+
+const preserveInstanceSubtreeOverrides = (
+    previousNodes: SceneNode[],
+    previousRootId: string,
+    nextNodes: SceneNode[],
+    nextRootId: string
+): SceneNode[] => {
+    const previousSubtreeIds = collectSubtreeIds(previousNodes, previousRootId);
+    const previousOverrideMap = new Map<string, Record<string, unknown>>();
+
+    previousNodes.forEach((node) => {
+        if (!previousSubtreeIds.has(node.id) || !isRecord(node.instanceOverrides)) return;
+        const path = getRelativeNodePath(previousNodes, previousRootId, node.id);
+        previousOverrideMap.set(path, cloneValue(node.instanceOverrides));
+    });
+
+    if (previousOverrideMap.size === 0) return nextNodes;
+
+    const nextSubtreeIds = collectSubtreeIds(nextNodes, nextRootId);
+    return nextNodes.map((node) => {
+        if (!nextSubtreeIds.has(node.id)) return node;
+        const path = getRelativeNodePath(nextNodes, nextRootId, node.id);
+        const previousOverrides = previousOverrideMap.get(path);
+        if (!previousOverrides) return node;
+        return reapplyInstanceOverrides({ ...node, instanceOverrides: previousOverrides }, getNodeById(nextNodes, node.masterId));
+    });
 };
 
 const sanitizeCornerValue = (value: number, fallback: number, maxCornerRadius: number): number => {
@@ -473,7 +702,7 @@ interface DesignStore extends DesignState {
   // History
   undo: () => void;
   redo: () => void;
-  pushHistory: () => void;
+    pushHistory: (source?: string) => void;
 }
 
 const initialPageId = uuidv4();
@@ -670,98 +899,19 @@ export const useStore = create<DesignStore>((set, get) => ({
   updateNode: (id, updates) => set((state) => {
     const currentPage = state.pages.find(p => p.id === state.currentPageId);
     if (!currentPage) return state;
-
-        const applyNodeUpdates = (baseNode: SceneNode, patch: Partial<SceneNode>): SceneNode => {
-            let updated = { ...baseNode, ...patch } as SceneNode;
-
-            // Sync legacy fill/stroke updates with multi-paint system, but preserve paint ids.
-            if (patch.fill !== undefined && patch.fills === undefined) {
-                const targetColor = String(patch.fill);
-                const nextFills: Paint[] = (updated.fills && updated.fills.length > 0)
-                    ? updated.fills.map((paint) => ({ ...paint }))
-                    : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: updated.opacity || 1, visible: true }];
-
-                let applied = false;
-                for (let i = nextFills.length - 1; i >= 0; i--) {
-                    if (nextFills[i].type === 'solid') {
-                        nextFills[i] = { ...nextFills[i], color: targetColor };
-                        applied = true;
-                        break;
-                    }
-                }
-
-                if (!applied) {
-                    nextFills.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
-                }
-
-                updated.fills = nextFills;
-            }
-
-            if (patch.stroke !== undefined && patch.strokes === undefined) {
-                const targetColor = String(patch.stroke);
-                const nextStrokes: Paint[] = (updated.strokes && updated.strokes.length > 0)
-                    ? updated.strokes.map((paint) => ({ ...paint }))
-                    : [{ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true }];
-
-                let applied = false;
-                for (let i = nextStrokes.length - 1; i >= 0; i--) {
-                    if (nextStrokes[i].type === 'solid') {
-                        nextStrokes[i] = { ...nextStrokes[i], color: targetColor };
-                        applied = true;
-                        break;
-                    }
-                }
-
-                if (!applied) {
-                    nextStrokes.push({ id: uuidv4(), type: 'solid', color: targetColor, opacity: 1, visible: true });
-                }
-
-                updated.strokes = nextStrokes;
-            }
-
-            if (patch.fills !== undefined) {
-                updated.fills = sanitizePaintCollection(updated.fills, updated.fill || '#D9D9D9');
-                updated.fill = deriveConvenienceColorFromPaints(updated.fills, 'transparent');
-            }
-
-            if (patch.strokes !== undefined) {
-                updated.strokes = sanitizePaintCollection(updated.strokes, updated.stroke || '#000000');
-                updated.stroke = deriveConvenienceColorFromPaints(updated.strokes, updated.stroke || '#000000');
-            }
-
-            const textUpdates = patch as Partial<TextNode>;
-            if (textUpdates.text !== undefined && updated.isAutoName) {
-                updated.name = textUpdates.text || 'Text';
-            }
-
-            updated = sanitizeNodeGeometry(updated, baseNode);
-            if (patch.name !== undefined && typeof patch.name === 'string') {
-                if (patch.name.trim() === '') {
-                    updated.isAutoName = true;
-                    if (updated.type === 'text') updated.name = updated.text || 'Text';
-                } else {
-                    updated.isAutoName = false;
-                }
-            }
-
-            if (updated.type === 'text') {
-                const textNode = updated as TextNode;
-                const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill') ? textNode.width : undefined;
-                const metrics = measureText(textNode.text, textNode.fontSize, textNode.fontFamily, maxWidth, textNode.lineHeight);
-
-                if (textNode.horizontalResizing === 'hug') updated.width = metrics.width;
-                if (textNode.verticalResizing === 'hug') updated.height = metrics.height;
-            }
-
-            return updated;
-        };
-
     let newNodes = currentPage.nodes.map((n) => {
             if (n.id !== id) return n;
-            return applyNodeUpdates(n, updates);
+            return applyNodePatch(n, updates);
     });
 
-        const sourceNode = newNodes.find((n) => n.id === id);
+        let sourceNode = newNodes.find((n) => n.id === id);
+        if (sourceNode?.masterId) {
+            const masterNode = getNodeById(newNodes, sourceNode.masterId) || getNodeById(currentPage.nodes, sourceNode.masterId);
+            const nextOverrides = buildInstanceOverrideRecord(sourceNode, updates, masterNode);
+            newNodes = newNodes.map((nodeEntry) => nodeEntry.id === id ? { ...sourceNode!, instanceOverrides: nextOverrides } : nodeEntry);
+            sourceNode = newNodes.find((nodeEntry) => nodeEntry.id === id);
+        }
+
         const sourceIsMasterNode = (() => {
             if (!sourceNode || sourceNode.type === 'instance') return false;
             let cursor: SceneNode | undefined = sourceNode;
@@ -773,13 +923,15 @@ export const useStore = create<DesignStore>((set, get) => ({
         })();
 
         const propagationPatch = Object.fromEntries(
-            Object.entries(updates).filter(([key]) => !['id', 'type', 'parentId', 'masterId', 'x', 'y', 'name'].includes(key))
+            Object.entries(updates).filter(([key]) => !['id', 'type', 'parentId', 'masterId', 'x', 'y', 'name', 'instanceOverrides'].includes(key))
         ) as Partial<SceneNode>;
 
         if (sourceIsMasterNode && Object.keys(propagationPatch).length > 0) {
+            const propagatedMasterNode = newNodes.find((nodeEntry) => nodeEntry.id === id);
             newNodes = newNodes.map((nodeEntry) => {
                 if (nodeEntry.masterId !== id) return nodeEntry;
-                return applyNodeUpdates(nodeEntry, propagationPatch);
+                const propagatedNode = applyNodePatch(nodeEntry, propagationPatch);
+                return reapplyInstanceOverrides(propagatedNode, propagatedMasterNode);
             });
         }
 
@@ -1073,7 +1225,8 @@ export const useStore = create<DesignStore>((set, get) => ({
         });
         if (!rebuilt) return state;
 
-        const nextNodes = [...filteredNodes, ...rebuilt.clonedSubtree];
+        let nextNodes = [...filteredNodes, ...rebuilt.clonedSubtree];
+        nextNodes = preserveInstanceSubtreeOverrides(currentPage.nodes, instanceNode.id, nextNodes, instanceNode.id);
         const pages = state.pages.map((page) =>
             page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
         );
@@ -1367,14 +1520,31 @@ export const useStore = create<DesignStore>((set, get) => ({
   addVariable: (v) => set(s => ({ variables: [...s.variables, { ...v, id: uuidv4() }] })),
   addStyle: (st) => set(s => ({ styles: [...s.styles, { ...st, id: uuidv4() }] })),
 
-  pushHistory: () => set((state) => {
-    const newHistory = state.history.slice(0, state.historyIndex + 1);
-    newHistory.push(JSON.parse(JSON.stringify(state.pages)));
-    if (newHistory.length > 50) newHistory.shift();
-    return {
-      history: newHistory,
-      historyIndex: newHistory.length - 1
-    };
+    pushHistory: (source = 'manual') => set((state) => {
+        const timestamp = Date.now();
+        const snapshot = deepClone(state.pages);
+        const nextHistory = state.history.slice(0, state.historyIndex + 1);
+        const shouldMerge = Boolean(
+            source !== 'manual' &&
+            lastHistoryCommit &&
+            lastHistoryCommit.source === source &&
+            timestamp - lastHistoryCommit.timestamp <= HISTORY_MERGE_WINDOW_MS &&
+            nextHistory.length > 0
+        );
+
+        if (shouldMerge) {
+            nextHistory[nextHistory.length - 1] = snapshot;
+        } else {
+            nextHistory.push(snapshot);
+            if (nextHistory.length > HISTORY_LIMIT) nextHistory.shift();
+        }
+
+        lastHistoryCommit = { source, timestamp };
+
+        return {
+            history: nextHistory,
+            historyIndex: nextHistory.length - 1
+        };
   }),
 
   deleteNodes: (ids) => set((state) => {
@@ -1480,6 +1650,7 @@ export const useStore = create<DesignStore>((set, get) => ({
   undo: () => set((state) => {
     if (state.historyIndex > 0) {
       const newIndex = state.historyIndex - 1;
+            resetHistoryCommit();
       return {
         pages: state.history[newIndex],
         historyIndex: newIndex
@@ -1491,6 +1662,7 @@ export const useStore = create<DesignStore>((set, get) => ({
   redo: () => set((state) => {
     if (state.historyIndex < state.history.length - 1) {
       const newIndex = state.historyIndex + 1;
+            resetHistoryCommit();
       return {
         pages: state.history[newIndex],
         historyIndex: newIndex

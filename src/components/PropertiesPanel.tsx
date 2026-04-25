@@ -10,6 +10,7 @@ import { exportToCode } from '../lib/codeExport';
 import { ColorPickerDialog, FillEditorDialog } from './FillEditorDialog';
 import { ModeTabs } from './ModeTabs';
 import { FlowReorderDirection, getAutoLayoutReorderInstruction } from '../lib/layerHierarchy';
+import { isPrototypeTargetNode } from '../lib/prototypeNoodles';
 
 export interface PropertiesPanelProps {
     className?: string;
@@ -190,6 +191,13 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
             return Array.from(grouped.values()).sort((a, b) => b.count - a.count);
         })()
         : [];
+
+    const prototypeNavigateTargets = [
+        ...pages.map((page) => ({ id: page.id, label: `Page: ${page.name}` })),
+        ...nodes
+            .filter((node) => isPrototypeTargetNode(node))
+            .map((node) => ({ id: node.id, label: `Frame: ${node.name}` })),
+    ];
 
   const handleBoolean = (operation: 'union' | 'subtract' | 'intersect' | 'exclude') => {
     const pathData = performBooleanOperation(selectedNodes, operation);
@@ -690,7 +698,8 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
                                 onChange={(e) => {
                                     const nextType = e.target.value as Interaction['actions'][number]['type'];
                                     if (nextType === 'navigate') {
-                                      updateInteractionAction(it.id, aidx, { type: nextType, targetId: pages[0]?.id, value: undefined });
+                                                                            const defaultTargetId = prototypeNavigateTargets[0]?.id;
+                                                                            updateInteractionAction(it.id, aidx, { type: nextType, targetId: defaultTargetId, value: defaultTargetId, animation: 'slide-in' });
                                     } else if (nextType === 'toggleVisibility') {
                                       updateInteractionAction(it.id, aidx, { type: nextType, targetId: nodes[0]?.id, value: true });
                                     } else {
@@ -705,18 +714,32 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
                                 <option value="toggleVisibility">toggleVisibility</option>
                              </select>
                              {action.type === 'navigate' && (
-                                <select
-                                    value={action.targetId || ''}
-                                    onChange={(e) => {
-                                      updateInteractionAction(it.id, aidx, { targetId: e.target.value });
-                                      pushHistory();
-                                    }}
-                                    className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
-                                >
-                                    {pages.map((page) => (
-                                      <option key={page.id} value={page.id}>{page.name}</option>
-                                    ))}
-                                </select>
+                                                                <div className="grid grid-cols-2 gap-2">
+                                                                        <select
+                                                                                value={action.targetId || ''}
+                                                                                onChange={(e) => {
+                                                                                    updateInteractionAction(it.id, aidx, { targetId: e.target.value, value: e.target.value });
+                                                                                    pushHistory();
+                                                                                }}
+                                                                                className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                                                        >
+                                                                                {prototypeNavigateTargets.map((target) => (
+                                                                                    <option key={target.id} value={target.id}>{target.label}</option>
+                                                                                ))}
+                                                                        </select>
+                                                                        <select
+                                                                                value={action.animation || 'slide-in'}
+                                                                                onChange={(e) => {
+                                                                                    updateInteractionAction(it.id, aidx, { animation: e.target.value as NonNullable<Interaction['actions'][number]['animation']> });
+                                                                                    pushHistory();
+                                                                                }}
+                                                                                className="h-7 bg-[#141414] border border-[#2A2A2A] rounded px-2 text-[10px] text-[#EDEDED] outline-none"
+                                                                        >
+                                                                                <option value="instant">instant</option>
+                                                                                <option value="slide-in">slide-in</option>
+                                                                                <option value="dissolve">dissolve</option>
+                                                                        </select>
+                                                                </div>
                              )}
                              {action.type === 'setVariable' && (
                                 <div className="grid grid-cols-2 gap-2">

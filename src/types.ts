@@ -29,6 +29,7 @@ export interface Interaction {
       type: 'navigate' | 'setVariable' | 'toggleVisibility';
       targetId?: string; // Page ID or Node ID or Variable ID
       value?: unknown;
+      animation?: 'instant' | 'slide-in' | 'dissolve';
   }[];
 }
 
@@ -59,6 +60,7 @@ export interface BaseNode {
   type: NodeType;
   parentId?: string;
   masterId?: string; // For Instances to link to Main Component
+  instanceOverrides?: Record<string, unknown>;
   variantGroupId?: string;
   variantName?: string;
   name: string;

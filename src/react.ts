@@ -6,6 +6,7 @@ export { NovaEditorComposer } from './components/NovaEditorComposer';
 export { PropertiesPanel } from './components/PropertiesPanel';
 export { Toolbar } from './components/Toolbar';
 export { NovaEditorShell } from './components/NovaEditorShell';
+export { Viewer } from './components/Viewer';
 
 export { useStore } from './store';
 export type { DesignState, SceneNode, ToolType, Viewport } from './types';
@@ -14,6 +15,7 @@ export type { ModeTabsProps, NovaEditorMode } from './components/ModeTabs';
 export type { NovaEditorComposerProps } from './components/NovaEditorComposer';
 export type { PropertiesPanelProps } from './components/PropertiesPanel';
 export type { NovaEditorShellProps } from './components/NovaEditorShell';
+export type { ViewerProps } from './components/Viewer';
 
 export { NovaThemeProvider } from './components/NovaThemeProvider';
 export type { NovaColorMode, NovaThemeProviderProps, NovaTheme } from './components/NovaThemeProvider';
