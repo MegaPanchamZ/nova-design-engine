@@ -47,12 +47,15 @@ Parser-focused browser-safe import is available from `nova-design-engine/parser`
 You can import prebuilt React editor components from `nova-design-engine/react`:
 
 - `NovaEditorShell`
+- `NovaEditorComposer` (piece-by-piece assembly)
 - `Canvas`
 - `Toolbar`
 - `LayersPanel`
 - `PropertiesPanel`
+- `ModeTabs` (Design/Prototype/Inspect)
 - `NovaAI`
 - `useStore`
+- `setNovaAIBinding`
 
 Example:
 
@@ -63,6 +66,75 @@ export default function App() {
    return <NovaEditorShell showChat />;
 }
 ```
+
+React AI security note:
+- The React package no longer reads `NEXT_PUBLIC_*` API keys.
+- `NovaAI` stays disabled until your app explicitly calls `setNovaAIBinding(...)`.
+- Provide a server-backed binding that calls your own API route or trusted backend. Do not expose provider secrets in browser env vars.
+
+Example binding for a host app:
+
+```tsx
+import { NovaLLMBinding, NovaEditorShell, setNovaAIBinding } from 'nova-design-engine/react';
+
+const binding: NovaLLMBinding = {
+   async complete(input) {
+      const response = await fetch('/api/nova/complete', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify(input),
+      });
+      return response.text();
+   },
+   async generateImage(prompt) {
+      const response = await fetch('/api/nova/image', {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
+         body: JSON.stringify({ prompt }),
+      });
+      return response.text();
+   },
+};
+
+setNovaAIBinding(binding);
+
+export default function App() {
+   return <NovaEditorShell showChat />;
+}
+```
+
+Piece-by-piece composition example:
+
+```tsx
+import {
+   Canvas,
+   LayersPanel,
+   NovaAI,
+   NovaEditorComposer,
+   PropertiesPanel,
+   Toolbar,
+} from 'nova-design-engine/react';
+
+export default function App() {
+   return (
+      <NovaEditorComposer
+         accentColor="#14b8a6"
+         panelBackgroundColor="#111315"
+         borderColor="#2f3539"
+         layers={<LayersPanel />}
+         canvas={<Canvas />}
+         toolbar={<Toolbar />}
+         properties={<PropertiesPanel modeTabsAccentColor="#14b8a6" />}
+         assistant={<NovaAI />}
+      />
+   );
+}
+```
+
+Notes:
+- `NovaEditorComposer` lets you replace or omit any slot (`layers`, `canvas`, `toolbar`, `properties`, `assistant`).
+- `accentColor`, `panelBackgroundColor`, `borderColor`, and `canvasBackgroundColor` are configurable via props.
+- Fake collaboration indicators were removed from default panels.
 
 ## JSON Presets And Schema
 

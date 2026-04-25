@@ -4,7 +4,30 @@ export { getSuperellipsePath } from './lib/geometry';
 export { measureText } from './lib/measureText';
 export { parseHTMLToNodes } from './lib/htmlParser';
 export { performBooleanOperation } from './lib/boolean';
-export { exportToCode } from './lib/codeExport';
+export { exportToCode, exportToCss } from './lib/codeExport';
+export { exportNodesToCss } from './lib/cssExport';
+export {
+  buildPathDataFromPenPoints,
+  insertAnchorAtPoint,
+  moveAnchorWithHandles,
+  moveControlHandle,
+  parsePathData,
+  pointToSegmentDistance,
+  serializePathData,
+  toggleAnchorCurve,
+} from './lib/pathTooling';
+export { buildMaskingRuns, maskNodeToCssClipPath } from './lib/masking';
+export {
+  findInnermostFrameAtPoint,
+  getGlobalPosition,
+  getSelectionBounds,
+  wrapSelectionInFrame,
+} from './lib/framing';
+export {
+  createInitialToolSession,
+  isDrawingTool,
+  reduceToolSession,
+} from './lib/toolStateMachine';
 
 export { DEFAULT_NOVA_SYSTEM_PROMPT } from './engine/defaultPrompt';
 export { nodesToHtmlContext } from './engine/context';

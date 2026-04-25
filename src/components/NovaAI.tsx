@@ -11,7 +11,11 @@ const SUGGESTED_PROMPTS = [
     "Add a feature grid"
 ];
 
-export const NovaAI = () => {
+export interface NovaAIProps {
+    className?: string;
+}
+
+export const NovaAI = ({ className }: NovaAIProps = {}) => {
     const [isOpen, setIsOpen] = useState(true);
     const [prompt, setPrompt] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -143,7 +147,7 @@ export const NovaAI = () => {
     }
 
     return (
-        <aside id="nova-ai-panel" className="w-80 border-l border-[#2A2A2A] bg-[#111111] flex flex-col h-full overflow-hidden select-none z-50">
+        <aside id="nova-ai-panel" className={`bg-[#111111] flex flex-col h-full w-full overflow-hidden select-none z-50 ${className || ''}`.trim()}>
             <div className="flex items-center justify-between px-4 py-3 border-b border-[#2A2A2A] bg-[#141414]">
                 <div className="flex items-center gap-2">
                     <Sparkles size={14} className="text-indigo-400" />

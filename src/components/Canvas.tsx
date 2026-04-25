@@ -6,6 +6,17 @@ import { createDefaultNode, Effect, ImageNode, Interaction, Paint, PathNode, Sce
 import Konva from 'konva';
 import { measureText } from '../lib/measureText';
 import { getSuperellipsePath } from '../lib/geometry';
+import {
+  buildPathDataFromPenPoints,
+  insertAnchorAtPoint,
+  moveAnchorWithHandles,
+  moveControlHandle,
+  parsePathData,
+  serializePathData,
+  toggleAnchorCurve,
+} from '../lib/pathTooling';
+import type { PathAnchor } from '../lib/pathTooling';
+import { buildMaskingRuns } from '../lib/masking';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
@@ -291,6 +302,23 @@ export const Canvas = () => {
           }
         }
         setSelectedPathAnchor(null);
+        return;
+      }
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && mode !== 'prototype' && !editingId && selectedIds.length > 0) {
+        const active = document.activeElement as HTMLElement | null;
+        const activeTag = active?.tagName?.toLowerCase();
+        const typingFieldFocused =
+          !!active &&
+          (active.isContentEditable || activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select');
+
+        if (!typingFieldFocused) {
+          e.preventDefault();
+          deleteNodes(selectedIds);
+          setSelectedIds([]);
+          setSelectedPathAnchor(null);
+          pushHistory();
+        }
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -305,7 +333,6 @@ export const Canvas = () => {
   }, [editingId, mode, nodes, pushHistory, selectedIds, selectedPathAnchor, setSnapLines, updateNode, viewport.zoom]);
 
   // Tool Tool Handlers
-  type PathAnchor = { x: number; y: number; cpIn?: { x: number; y: number }; cpOut?: { x: number; y: number } };
 
   const clampCoord = (value: number, fallback = 0) => {
     if (!Number.isFinite(value)) return fallback;
@@ -317,138 +344,20 @@ export const Canvas = () => {
     return Math.max(1, Math.min(1_000_000, Math.abs(value)));
   };
 
-  const parsePathData = (data: string): { anchors: PathAnchor[]; closed: boolean } => {
-    const tokens = data.match(/[MLCZmlcz]|-?\d*\.?\d+/g) || [];
-    const anchors: PathAnchor[] = [];
-    let i = 0;
-    let cmd = '';
-    let closed = false;
-
-    while (i < tokens.length) {
-      const token = tokens[i];
-      if (/^[MLCZmlcz]$/.test(token)) {
-        cmd = token.toUpperCase();
-        i += 1;
-        if (cmd === 'Z') {
-          closed = true;
-          continue;
-        }
-      }
-
-      if (!cmd) break;
-
-      if (cmd === 'M' || cmd === 'L') {
-        const x = Number(tokens[i++]);
-        const y = Number(tokens[i++]);
-        if (Number.isFinite(x) && Number.isFinite(y)) anchors.push({ x, y });
-        if (cmd === 'M') cmd = 'L';
-        continue;
-      }
-
-      if (cmd === 'C') {
-        const c1x = Number(tokens[i++]);
-        const c1y = Number(tokens[i++]);
-        const c2x = Number(tokens[i++]);
-        const c2y = Number(tokens[i++]);
-        const x = Number(tokens[i++]);
-        const y = Number(tokens[i++]);
-        if ([c1x, c1y, c2x, c2y, x, y].every(Number.isFinite)) {
-          const previous = anchors[anchors.length - 1];
-          if (previous) previous.cpOut = { x: c1x, y: c1y };
-          anchors.push({ x, y, cpIn: { x: c2x, y: c2y } });
-        }
-      }
-    }
-
-    return { anchors, closed };
-  };
-
-  const serializePathData = (anchors: PathAnchor[], closed: boolean) => {
-    if (anchors.length === 0) return '';
-    let result = `M ${anchors[0].x} ${anchors[0].y}`;
-    for (let i = 1; i < anchors.length; i++) {
-      const prev = anchors[i - 1];
-      const curr = anchors[i];
-      if (prev.cpOut || curr.cpIn) {
-        const c1 = prev.cpOut || { x: prev.x, y: prev.y };
-        const c2 = curr.cpIn || { x: curr.x, y: curr.y };
-        result += ` C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${curr.x} ${curr.y}`;
-      } else {
-        result += ` L ${curr.x} ${curr.y}`;
-      }
-    }
-    if (closed) result += ' Z';
-    return result;
-  };
-
-  const pointToSegmentDistance = (
-    point: { x: number; y: number },
-    a: { x: number; y: number },
-    b: { x: number; y: number }
-  ) => {
-    const abx = b.x - a.x;
-    const aby = b.y - a.y;
-    const apx = point.x - a.x;
-    const apy = point.y - a.y;
-    const ab2 = abx * abx + aby * aby;
-    if (ab2 <= 0.000001) {
-      const dx = point.x - a.x;
-      const dy = point.y - a.y;
-      return { distance: Math.sqrt(dx * dx + dy * dy), t: 0 };
-    }
-    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / ab2));
-    const closestX = a.x + abx * t;
-    const closestY = a.y + aby * t;
-    const dx = point.x - closestX;
-    const dy = point.y - closestY;
-    return { distance: Math.sqrt(dx * dx + dy * dy), t };
-  };
-
   const insertPathAnchorAtPointer = (nodeId: string) => {
     const node = nodes.find((entry) => entry.id === nodeId);
     if (!node || node.type !== 'path') return;
 
     const parsed = parsePathData(node.data);
-    const anchors = [...parsed.anchors];
-    if (anchors.length < 2) return;
-
     const pointer = getPointerPosition();
     const globalPos = getGlobalPosition(nodeId);
     const localPoint = { x: pointer.x - globalPos.x, y: pointer.y - globalPos.y };
 
-    let bestSegmentStart = 0;
-    let bestT = 0.5;
-    let bestDistance = Number.POSITIVE_INFINITY;
+    const result = insertAnchorAtPoint(parsed, localPoint);
+    if (!result) return;
 
-    for (let i = 0; i < anchors.length - 1; i++) {
-      const result = pointToSegmentDistance(localPoint, anchors[i], anchors[i + 1]);
-      if (result.distance < bestDistance) {
-        bestDistance = result.distance;
-        bestSegmentStart = i;
-        bestT = result.t;
-      }
-    }
-
-    if (parsed.closed && anchors.length > 2) {
-      const result = pointToSegmentDistance(localPoint, anchors[anchors.length - 1], anchors[0]);
-      if (result.distance < bestDistance) {
-        bestDistance = result.distance;
-        bestSegmentStart = anchors.length - 1;
-        bestT = result.t;
-      }
-    }
-
-    const start = anchors[bestSegmentStart];
-    const end = bestSegmentStart === anchors.length - 1 ? anchors[0] : anchors[bestSegmentStart + 1];
-    const inserted: PathAnchor = {
-      x: start.x + (end.x - start.x) * bestT,
-      y: start.y + (end.y - start.y) * bestT,
-    };
-
-    const insertionIndex = bestSegmentStart === anchors.length - 1 ? anchors.length : bestSegmentStart + 1;
-    anchors.splice(insertionIndex, 0, inserted);
-    updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
-    setSelectedPathAnchor({ nodeId, index: insertionIndex });
+    updateNode(nodeId, { data: serializePathData(result.anchors, parsed.closed) });
+    setSelectedPathAnchor({ nodeId, index: result.insertionIndex });
     pushHistory();
   };
 
@@ -508,16 +417,8 @@ export const Canvas = () => {
     const nextY = pointer.y - globalPos.y;
 
     updatePathAnchors(nodeId, (anchors) => {
-      const target = anchors[index];
-      if (!target) return;
-
-      const dx = nextX - target.x;
-      const dy = nextY - target.y;
-
-      target.x = nextX;
-      target.y = nextY;
-      if (target.cpIn) target.cpIn = { x: target.cpIn.x + dx, y: target.cpIn.y + dy };
-      if (target.cpOut) target.cpOut = { x: target.cpOut.x + dx, y: target.cpOut.y + dy };
+      const next = moveAnchorWithHandles(anchors, index, { x: nextX, y: nextY });
+      anchors.splice(0, anchors.length, ...next);
     });
   };
 
@@ -532,19 +433,8 @@ export const Canvas = () => {
     const mirrorHandle = !event.evt.altKey;
 
     updatePathAnchors(nodeId, (anchors) => {
-      const target = anchors[index];
-      if (!target) return;
-      if (kind === 'in') {
-        target.cpIn = { x: nextX, y: nextY };
-        if (mirrorHandle) {
-          target.cpOut = { x: target.x + (target.x - nextX), y: target.y + (target.y - nextY) };
-        }
-      } else {
-        target.cpOut = { x: nextX, y: nextY };
-        if (mirrorHandle) {
-          target.cpIn = { x: target.x + (target.x - nextX), y: target.y + (target.y - nextY) };
-        }
-      }
+      const next = moveControlHandle(anchors, index, kind, { x: nextX, y: nextY }, mirrorHandle);
+      anchors.splice(0, anchors.length, ...next);
     });
   };
 
@@ -554,35 +444,25 @@ export const Canvas = () => {
 
     const parsed = parsePathData(node.data);
     const anchors = [...parsed.anchors];
-    const anchor = anchors[index];
-    if (!anchor) return;
-
-    if (anchor.cpIn || anchor.cpOut) {
-      anchor.cpIn = undefined;
-      anchor.cpOut = undefined;
-    } else {
-      const prev = anchors[index - 1] || anchor;
-      const next = anchors[index + 1] || anchor;
-      let vx = next.x - prev.x;
-      let vy = next.y - prev.y;
-      const length = Math.hypot(vx, vy);
-
-      if (length < 0.001) {
-        vx = 1;
-        vy = 0;
-      } else {
-        vx /= length;
-        vy /= length;
-      }
-
-      const handleLength = Math.max(12, Math.min(60, length / 4 || 24));
-      anchor.cpIn = { x: anchor.x - vx * handleLength, y: anchor.y - vy * handleLength };
-      anchor.cpOut = { x: anchor.x + vx * handleLength, y: anchor.y + vy * handleLength };
-    }
-
-    updateNode(nodeId, { data: serializePathData(anchors, parsed.closed) });
+    const toggled = toggleAnchorCurve(anchors, index);
+    updateNode(nodeId, { data: serializePathData(toggled, parsed.closed) });
     setSelectedPathAnchor({ nodeId, index });
     pushHistory();
+  };
+
+  const filterTopLevelSelection = (ids: string[]): string[] => {
+    const selectedSet = new Set(ids);
+
+    const hasSelectedAncestor = (nodeId: string): boolean => {
+      let cursor = nodes.find((node) => node.id === nodeId)?.parentId;
+      while (cursor) {
+        if (selectedSet.has(cursor)) return true;
+        cursor = nodes.find((node) => node.id === cursor)?.parentId;
+      }
+      return false;
+    };
+
+    return ids.filter((nodeId) => !hasSelectedAncestor(nodeId));
   };
 
   // Handle selection Transformer
@@ -592,7 +472,7 @@ export const Canvas = () => {
         transformerRef.current.nodes([]);
         return;
       }
-      const selectedNodes = selectedIds
+      const selectedNodes = filterTopLevelSelection(selectedIds)
         .map(id => stageRef.current?.findOne('#' + id))
         .filter(node => node !== undefined) as Konva.Node[];
       
@@ -686,7 +566,7 @@ export const Canvas = () => {
 
   const findInnermostFrame = (x: number, y: number, excludeIds: string[] = []): string | undefined => {
     const frames = nodes.filter(n => {
-      if ((n.type !== 'frame' && n.type !== 'section') || excludeIds.includes(n.id)) return false;
+      if (!isFrameLikeNode(n) || excludeIds.includes(n.id)) return false;
       const globalPos = getGlobalPosition(n.id);
       return x >= globalPos.x && x <= globalPos.x + n.width &&
              y >= globalPos.y && y <= globalPos.y + n.height;
@@ -787,36 +667,16 @@ export const Canvas = () => {
   };
 
   const finalizePenPath = (closed: boolean = false) => {
-    if (penPoints.length < 2) {
+    const built = buildPathDataFromPenPoints(penPoints, closed);
+    if (!built) {
       setPenPoints([]);
       return;
     }
-    
-    // Find bounding box for the path
-    const xs = penPoints.map(p => p.x);
-    const ys = penPoints.map(p => p.y);
-    const minX = Math.min(...xs);
-    const minY = Math.min(...ys);
-    const maxX = Math.max(...xs);
-    const maxY = Math.max(...ys);
 
-    // Normalize coordinates so node x,y is at top-left
-    let data = `M ${penPoints[0].x - minX} ${penPoints[0].y - minY}`;
-    for (let i = 1; i < penPoints.length; i++) {
-        const prev = penPoints[i - 1];
-        const curr = penPoints[i];
-        if (prev.cp2 && curr.cp1) {
-            data += ` C ${prev.cp2.x - minX} ${prev.cp2.y - minY}, ${curr.cp1.x - minX} ${curr.cp1.y - minY}, ${curr.x - minX} ${curr.y - minY}`;
-        } else {
-            data += ` L ${curr.x - minX} ${curr.y - minY}`;
-        }
-    }
-    if (closed) data += ' Z';
-
-    const node = createDefaultNode('path', minX, minY) as PathNode;
-    node.data = data;
-    node.width = Math.max(1, maxX - minX);
-    node.height = Math.max(1, maxY - minY);
+    const node = createDefaultNode('path', built.bounds.minX, built.bounds.minY) as PathNode;
+    node.data = built.data;
+    node.width = built.bounds.width;
+    node.height = built.bounds.height;
     node.strokeWidth = 2;
     node.stroke = '#6366F1';
     addNode(node);
@@ -1319,6 +1179,12 @@ export const Canvas = () => {
           verticalResizing: 'fixed' 
       } : {})
     });
+
+    if (isTransformEvent) {
+      konvaNode.scaleX(1);
+      konvaNode.scaleY(1);
+    }
+
     setSnapLines(snappedTransform.guides);
     setTimeout(() => setSnapLines([]), 90);
     pushHistory();
@@ -2325,93 +2191,75 @@ export const Canvas = () => {
     const parentNodes = nodes.filter(n => n.parentId === parentNodeId);
     if (parentNodes.length === 0) return null;
 
-    const result: React.ReactNode[] = [];
-    let currentMask: SceneNode | null = null;
-    let maskedNodes: SceneNode[] = [];
+    return buildMaskingRuns(parentNodes).map((run) => {
+      if (run.type === 'normal') {
+        return renderSingleNode(run.node);
+      }
 
-    const flushMask = () => {
-        if (currentMask) {
-            const mask = currentMask;
-            const contents = [...maskedNodes];
-            result.push(
-                <Group key={`mask-group-${mask.id}`}>
-                    {renderSingleNode(mask)}
-                    <Group 
-                        clipFunc={(ctx) => {
-                            ctx.beginPath();
-                            
-                            // Apply transformation for rotation
-                            ctx.save();
-                            ctx.translate(mask.x + mask.width / 2, mask.y + mask.height / 2);
-                            ctx.rotate((mask.rotation || 0) * Math.PI / 180);
-                            ctx.translate(-mask.width / 2, -mask.height / 2);
+      const mask = run.mask;
+      const contents = [...run.maskedNodes];
 
-                            if (mask.type === 'rect' || mask.type === 'frame' || mask.type === 'section' || mask.type === 'image') {
-                              const r = getSanitizedCornerData(mask).corners;
-                                const w = mask.width;
-                                const h = mask.height;
-                                
-                                // Standard Rounded Rect with individual corners
-                                ctx.moveTo(r.topLeft, 0);
-                                ctx.lineTo(w - r.topRight, 0);
-                                ctx.quadraticCurveTo(w, 0, w, r.topRight);
-                                ctx.lineTo(w, h - r.bottomRight);
-                                ctx.quadraticCurveTo(w, h, w - r.bottomRight, h);
-                                ctx.lineTo(r.bottomLeft, h);
-                                ctx.quadraticCurveTo(0, h, 0, h - r.bottomLeft);
-                                ctx.lineTo(0, r.topLeft);
-                                ctx.quadraticCurveTo(0, 0, r.topLeft, 0);
-                            } else if (mask.type === 'circle') {
-                                ctx.arc(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), 0, Math.PI * 2);
-                            } else if (mask.type === 'ellipse') {
-                                ctx.ellipse(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), Math.abs(mask.height / 2), 0, 0, Math.PI * 2);
-                            } else if (mask.type === 'text') {
-                                ctx.rect(0, 0, mask.width, mask.height);
-                            } else if (mask.type === 'path') {
-                              const parsed = parsePathData(mask.data || '');
-                              if (parsed.anchors.length > 0) {
-                                ctx.moveTo(parsed.anchors[0].x, parsed.anchors[0].y);
-                                for (let i = 1; i < parsed.anchors.length; i++) {
-                                  const prev = parsed.anchors[i - 1];
-                                  const curr = parsed.anchors[i];
-                                  if (prev.cpOut || curr.cpIn) {
-                                    const c1 = prev.cpOut || { x: prev.x, y: prev.y };
-                                    const c2 = curr.cpIn || { x: curr.x, y: curr.y };
-                                    ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, curr.x, curr.y);
-                                  } else {
-                                    ctx.lineTo(curr.x, curr.y);
-                                  }
-                                }
-                                if (parsed.closed) ctx.closePath();
-                              } else {
-                                ctx.rect(0, 0, Math.max(1, mask.width), Math.max(1, mask.height));
-                              }
-                            }
-                            ctx.restore();
-                        }}
-                    >
-                        {contents.map(n => renderSingleNode(n))}
-                    </Group>
-                </Group>
-            );
-            currentMask = null;
-            maskedNodes = [];
-        }
-    };
+      return (
+        <Group key={`mask-group-${mask.id}`}>
+          {renderSingleNode(mask)}
+          <Group
+            clipFunc={(ctx) => {
+              ctx.beginPath();
 
-    parentNodes.forEach((node) => {
-        if (node.isMask) {
-            flushMask();
-            currentMask = node;
-        } else if (currentMask) {
-            maskedNodes.push(node);
-        } else {
-            result.push(renderSingleNode(node));
-        }
+              ctx.save();
+              ctx.translate(mask.x + mask.width / 2, mask.y + mask.height / 2);
+              ctx.rotate((mask.rotation || 0) * Math.PI / 180);
+              ctx.translate(-mask.width / 2, -mask.height / 2);
+
+              if (mask.type === 'rect' || mask.type === 'frame' || mask.type === 'section' || mask.type === 'image') {
+                const r = getSanitizedCornerData(mask).corners;
+                const w = mask.width;
+                const h = mask.height;
+
+                ctx.moveTo(r.topLeft, 0);
+                ctx.lineTo(w - r.topRight, 0);
+                ctx.quadraticCurveTo(w, 0, w, r.topRight);
+                ctx.lineTo(w, h - r.bottomRight);
+                ctx.quadraticCurveTo(w, h, w - r.bottomRight, h);
+                ctx.lineTo(r.bottomLeft, h);
+                ctx.quadraticCurveTo(0, h, 0, h - r.bottomLeft);
+                ctx.lineTo(0, r.topLeft);
+                ctx.quadraticCurveTo(0, 0, r.topLeft, 0);
+              } else if (mask.type === 'circle') {
+                ctx.arc(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), 0, Math.PI * 2);
+              } else if (mask.type === 'ellipse') {
+                ctx.ellipse(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), Math.abs(mask.height / 2), 0, 0, Math.PI * 2);
+              } else if (mask.type === 'text') {
+                ctx.rect(0, 0, mask.width, mask.height);
+              } else if (mask.type === 'path') {
+                const parsed = parsePathData(mask.data || '');
+                if (parsed.anchors.length > 0) {
+                  ctx.moveTo(parsed.anchors[0].x, parsed.anchors[0].y);
+                  for (let index = 1; index < parsed.anchors.length; index += 1) {
+                    const prev = parsed.anchors[index - 1];
+                    const current = parsed.anchors[index];
+                    if (prev.cpOut || current.cpIn) {
+                      const c1 = prev.cpOut || { x: prev.x, y: prev.y };
+                      const c2 = current.cpIn || { x: current.x, y: current.y };
+                      ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, current.x, current.y);
+                    } else {
+                      ctx.lineTo(current.x, current.y);
+                    }
+                  }
+                  if (parsed.closed) ctx.closePath();
+                } else {
+                  ctx.rect(0, 0, Math.max(1, mask.width), Math.max(1, mask.height));
+                }
+              }
+
+              ctx.restore();
+            }}
+          >
+            {contents.map((node) => renderSingleNode(node))}
+          </Group>
+        </Group>
+      );
     });
-    flushMask();
-
-    return result;
   };
 
   return (

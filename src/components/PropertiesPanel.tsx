@@ -8,6 +8,12 @@ import { GOOGLE_FONTS, loadFont } from '../services/fontService';
 import { v4 as uuidv4 } from 'uuid';
 import { exportToCode } from '../lib/codeExport';
 import { ColorPickerDialog, FillEditorDialog } from './FillEditorDialog';
+import { ModeTabs } from './ModeTabs';
+
+export interface PropertiesPanelProps {
+    className?: string;
+    modeTabsAccentColor?: string;
+}
 
 interface ColorDialogState {
     isOpen: boolean;
@@ -98,7 +104,7 @@ const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: { size: number
     </svg>
 );
 
-export const PropertiesPanel = () => {
+export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPanelProps) => {
     const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected, createComponentFromSelection, createInstanceFromComponent, createVariantFromComponent, switchInstanceVariant } = useStore();
   const [expandedPadding, setExpandedPadding] = useState(false);
   const [expandedRadius, setExpandedRadius] = useState(false);
@@ -122,6 +128,9 @@ export const PropertiesPanel = () => {
     const variantOptions = activeVariantGroupId
         ? nodes.filter((node) => node.type === 'component' && (node as FrameNode).variantGroupId === activeVariantGroupId) as FrameNode[]
         : [];
+    const instanceCountForSelectedComponent = selectedComponentNode
+        ? nodes.filter((node) => node.type === 'instance' && node.masterId === selectedComponentNode.id).length
+        : 0;
     const selectedFrameNode = selectedNode && ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type) ? (selectedNode as FrameNode) : null;
     const selectedTextNode = selectedNode?.type === 'text' ? (selectedNode as TextNode) : null;
 
@@ -353,21 +362,8 @@ export const PropertiesPanel = () => {
 
   if (selectedNodes.length === 0) {
     return (
-            <aside id="properties-panel" className="w-80 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
-        <div className="flex border-b border-[#2A2A2A]">
-          <div 
-            onClick={() => setMode('design')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'design' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Design</div>
-          <div 
-            onClick={() => setMode('prototype')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'prototype' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Prototype</div>
-          <div 
-            onClick={() => setMode('inspect')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'inspect' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Inspect</div>
-        </div>
+                        <aside id="properties-panel" className={`bg-[#141414] flex flex-col h-full w-full overflow-hidden select-none ${className || ''}`.trim()}>
+                <ModeTabs mode={mode} onModeChange={setMode} accentColor={modeTabsAccentColor} />
         <div className="flex flex-col items-center justify-center flex-1 p-8 text-center gap-4">
           <div className="w-12 h-12 rounded-full border border-[#2A2A2A] flex items-center justify-center text-[#2A2A2A]">
             <Settings2 size={24} />
@@ -381,21 +377,8 @@ export const PropertiesPanel = () => {
     const isFrame = ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type);
 
   return (
-        <aside id="properties-panel" className="w-80 border-l border-[#2A2A2A] bg-[#141414] flex flex-col h-full overflow-hidden select-none">
-      <div className="flex border-b border-[#2A2A2A]">
-          <div 
-            onClick={() => setMode('design')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'design' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Design</div>
-          <div 
-            onClick={() => setMode('prototype')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'prototype' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Prototype</div>
-          <div 
-            onClick={() => setMode('inspect')}
-            className={`flex-1 text-center py-2.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${mode === 'inspect' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-[#444] hover:text-[#777]'}`}
-          >Inspect</div>
-      </div>
+                <aside id="properties-panel" className={`bg-[#141414] flex flex-col h-full w-full overflow-hidden select-none ${className || ''}`.trim()}>
+            <ModeTabs mode={mode} onModeChange={setMode} accentColor={modeTabsAccentColor} />
 
         {/* Selection Header */}
         <div className="h-12 flex items-center justify-between px-4 border-b border-[#2A2A2A] bg-[#1E1E1E]">
@@ -786,6 +769,75 @@ export const PropertiesPanel = () => {
                         </option>
                     ))}
                 </select>
+            </div>
+        )}
+
+        {(selectedNode.type === 'component' || selectedNode.type === 'instance') && (
+            <div className="px-4 py-3 border-b border-[#2A2A2A] space-y-3">
+                <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase tracking-widest text-[#666] font-black">Component</div>
+                    <span className="text-[9px] px-2 py-0.5 rounded border border-[#3A3A3A] text-[#AFAFAF] uppercase tracking-wide">
+                        {selectedNode.type === 'component' ? 'Master' : 'Instance'}
+                    </span>
+                </div>
+
+                {selectedNode.type === 'instance' ? (
+                    <>
+                        <div className="text-[10px] text-[#9B9B9B] leading-relaxed">
+                            Linked to: <span className="text-[#EDEDED]">{selectedInstanceMaster?.name || 'Missing component master'}</span>
+                        </div>
+                        <button
+                            onClick={() => {
+                                if (!selectedInstanceMaster) return;
+                                setSelectedIds([selectedInstanceMaster.id]);
+                            }}
+                            disabled={!selectedInstanceMaster}
+                            className="w-full h-8 rounded-sm border border-[#3A3A3A] text-[10px] uppercase tracking-wider text-[#D5D5D5] disabled:opacity-40 hover:bg-[#2C2C2C]"
+                        >
+                            Go To Master Component
+                        </button>
+                    </>
+                ) : (
+                    <>
+                        <div className="text-[10px] text-[#9B9B9B] leading-relaxed">
+                            Instances on canvas: <span className="text-[#EDEDED]">{instanceCountForSelectedComponent}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <button
+                                onClick={() => {
+                                    createInstanceFromComponent(selectedNode.id);
+                                    pushHistory();
+                                }}
+                                className="h-8 rounded-sm border border-[#3A3A3A] text-[10px] uppercase tracking-wider text-[#D5D5D5] hover:bg-[#2C2C2C]"
+                            >
+                                New Instance
+                            </button>
+                            <button
+                                onClick={() => {
+                                    createVariantFromComponent(selectedNode.id);
+                                    pushHistory();
+                                }}
+                                className="h-8 rounded-sm border border-[#3A3A3A] text-[10px] uppercase tracking-wider text-[#D5D5D5] hover:bg-[#2C2C2C]"
+                            >
+                                New Variant
+                            </button>
+                        </div>
+                        <button
+                            onClick={() => {
+                                const instanceIds = nodes
+                                    .filter((node) => node.type === 'instance' && node.masterId === selectedNode.id)
+                                    .map((node) => node.id);
+                                if (instanceIds.length > 0) {
+                                    setSelectedIds(instanceIds);
+                                }
+                            }}
+                            disabled={instanceCountForSelectedComponent === 0}
+                            className="w-full h-8 rounded-sm border border-[#3A3A3A] text-[10px] uppercase tracking-wider text-[#D5D5D5] disabled:opacity-40 hover:bg-[#2C2C2C]"
+                        >
+                            Select All Instances
+                        </button>
+                    </>
+                )}
             </div>
         )}
 
@@ -1991,18 +2043,6 @@ export const PropertiesPanel = () => {
         )}
       </div>
 
-      {/* Multiplayer Presence Mini-UI */}
-      <div className="mt-auto border-t border-[#2A2A2A] p-4 flex items-center justify-between bg-[#0F0F0F]">
-        <div className="flex -space-x-2">
-          <div className="w-6 h-6 rounded-full border border-[#141414] bg-indigo-500 text-[8px] flex items-center justify-center font-bold text-white shadow-lg">JD</div>
-          <div className="w-6 h-6 rounded-full border border-[#141414] bg-pink-500 text-[8px] flex items-center justify-center font-bold text-white shadow-lg">AM</div>
-          <div className="w-6 h-6 rounded-full border border-[#141414] bg-[#2A2A2A] text-[8px] flex items-center justify-center font-bold text-[#A1A1A1]">+2</div>
-        </div>
-        <div className="flex items-center gap-1.5 bg-[#0A0A0A] px-2 py-1 rounded-full border border-indigo-500/20">
-          <div className="w-1 h-1 rounded-full bg-green-400 animate-pulse"></div>
-          <span className="text-[8px] text-green-400/80 uppercase font-black tracking-widest">Sync</span>
-        </div>
-      </div>
     </aside>
   );
 };

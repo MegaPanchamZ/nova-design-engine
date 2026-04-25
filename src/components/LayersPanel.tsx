@@ -241,7 +241,12 @@ const SortablePage = ({ page, isActive, onSelect, onRename }: SortablePageProps)
     );
 };
 
-export const LayersPanel = () => {
+export interface LayersPanelProps {
+    className?: string;
+    showFooterMeta?: boolean;
+}
+
+export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelProps) => {
   const { pages, setPages, updatePage, currentPageId, setPage, addPage, selectedIds, setSelectedIds, updateNode, addNode, pushHistory, moveNodeHierarchy } = useStore();
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [activePageId, setActivePageId] = useState<string | null>(null);
@@ -333,7 +338,7 @@ export const LayersPanel = () => {
   };
 
   return (
-    <aside id="layers-panel" className="w-60 border-r border-[#2A2A2A] bg-[#141414] flex flex-col h-full select-none overflow-hidden">
+    <aside id="layers-panel" className={`bg-[#141414] flex flex-col h-full w-full select-none overflow-hidden ${className || ''}`.trim()}>
       <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -435,12 +440,13 @@ export const LayersPanel = () => {
       </div>
       </DndContext>
 
-      <div className="p-3 border-t border-[#2A2A2A] bg-[#0A0A0A]">
-          <div className="flex items-center gap-2 text-[9px] text-[#444] font-mono tracking-tighter uppercase overflow-hidden">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-500/50 animate-pulse" />
-            <span className="truncate">Session: {currentPageId.slice(0, 8)}</span>
-          </div>
-      </div>
+            {showFooterMeta ? (
+                <div className="p-3 border-t border-[#2A2A2A] bg-[#0A0A0A]">
+                    <div className="flex items-center gap-2 text-[9px] text-[#666] font-mono tracking-tighter uppercase overflow-hidden">
+                        <span className="truncate">Page: {currentPage?.name || 'Untitled'}</span>
+                    </div>
+                </div>
+            ) : null}
     </aside>
   );
 };

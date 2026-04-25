@@ -87,6 +87,14 @@ export interface BaseNode {
   horizontalResizing: 'fixed' | 'hug' | 'fill';
   verticalResizing: 'fixed' | 'hug' | 'fill';
   isAbsolute?: boolean; // Breaks Auto Layout flow
+  layoutAlignSelf?: 'auto' | 'start' | 'center' | 'end' | 'stretch';
+  layoutGrow?: number;
+  layoutShrink?: number;
+  layoutBasis?: 'auto' | number;
+  minWidth?: number;
+  maxWidth?: number;
+  minHeight?: number;
+  maxHeight?: number;
   // High-End Rendering
   cornerRadius: number;
   individualCornerRadius?: {
@@ -112,6 +120,10 @@ export interface FrameNode extends BaseNode {
   layoutMode: 'none' | 'horizontal' | 'vertical' | 'grid';
   padding: { top: number; right: number; bottom: number; left: number };
   gap: number;
+  rowGap?: number;
+  columnGap?: number;
+  layoutWrap?: 'nowrap' | 'wrap';
+  alignContent?: 'start' | 'center' | 'end' | 'space-between' | 'stretch';
   justifyContent: 'start' | 'center' | 'end' | 'space-between';
   alignItems: 'start' | 'center' | 'end' | 'stretch';
   clipsContent: boolean;
@@ -263,6 +275,14 @@ export const createDefaultNode = (type: NodeType, x: number, y: number, id?: str
     horizontalResizing: 'fixed',
     verticalResizing: 'fixed',
     isAbsolute: false,
+    layoutAlignSelf: 'auto',
+    layoutGrow: 0,
+    layoutShrink: 1,
+    layoutBasis: 'auto',
+    minWidth: 0,
+    maxWidth: Number.POSITIVE_INFINITY,
+    minHeight: 0,
+    maxHeight: Number.POSITIVE_INFINITY,
     cornerRadius: 0,
     individualCornerRadius: {
       topLeft: 0,
@@ -298,6 +318,10 @@ export const createDefaultNode = (type: NodeType, x: number, y: number, id?: str
         layoutMode: 'none', 
         padding: { top: 0, right: 0, bottom: 0, left: 0 }, 
         gap: 0,
+        rowGap: undefined,
+        columnGap: undefined,
+        layoutWrap: 'nowrap',
+        alignContent: 'start',
         justifyContent: 'start',
         alignItems: 'start',
         clipsContent: type === 'group' ? false : true,

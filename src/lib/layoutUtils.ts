@@ -1,295 +1,394 @@
 import { SceneNode, FrameNode, TextNode } from '../types';
 import { measureText } from './measureText';
 
-export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { frame: FrameNode, children: SceneNode[] } => {
+type Axis = 'horizontal' | 'vertical';
+
+interface FlexLine {
+  nodes: SceneNode[];
+  mainSize: number;
+  crossSize: number;
+}
+
+const clampFinite = (value: number, fallback: number): number => {
+  if (!Number.isFinite(value)) return fallback;
+  return value;
+};
+
+const clampToNodeLimits = (node: SceneNode, axis: Axis, value: number): number => {
+  const min = axis === 'horizontal' ? clampFinite(node.minWidth ?? 0, 0) : clampFinite(node.minHeight ?? 0, 0);
+  const maxRaw = axis === 'horizontal' ? node.maxWidth : node.maxHeight;
+  const max = Number.isFinite(maxRaw) ? (maxRaw as number) : Number.POSITIVE_INFINITY;
+  return Math.max(min, Math.min(max, value));
+};
+
+const getAxisSize = (node: SceneNode, axis: Axis): number => {
+  return axis === 'horizontal' ? node.width : node.height;
+};
+
+const setAxisSize = (node: SceneNode, axis: Axis, value: number) => {
+  const normalized = Math.max(1, clampToNodeLimits(node, axis, value));
+  if (axis === 'horizontal') node.width = normalized;
+  else node.height = normalized;
+};
+
+const getAxisPosition = (node: SceneNode, axis: Axis): number => {
+  return axis === 'horizontal' ? node.x : node.y;
+};
+
+const setAxisPosition = (node: SceneNode, axis: Axis, value: number) => {
+  if (axis === 'horizontal') node.x = value;
+  else node.y = value;
+};
+
+const getResizingMode = (node: SceneNode, axis: Axis): 'fixed' | 'hug' | 'fill' => {
+  return axis === 'horizontal' ? node.horizontalResizing : node.verticalResizing;
+};
+
+const measureTextNode = (node: SceneNode, maxWidth?: number) => {
+  if (node.type !== 'text') return;
+  const text = node as TextNode;
+  const metrics = measureText(text.text, text.fontSize, text.fontFamily, maxWidth, text.lineHeight);
+  if (node.horizontalResizing === 'hug') node.width = clampToNodeLimits(node, 'horizontal', metrics.width);
+  if (node.verticalResizing === 'hug') node.height = clampToNodeLimits(node, 'vertical', metrics.height);
+};
+
+const parseGridDimension = (value: number | string | undefined, fallback: number): number => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (typeof value === 'string') {
+    const parsed = parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    const tokens = value.split(/\s+/).filter(Boolean);
+    if (tokens.length > 0) return tokens.length;
+  }
+  return fallback;
+};
+
+const parseGridTracks = (value: number | string | undefined, fallbackCount: number): string[] => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Array.from({ length: Math.floor(value) }, () => '1fr');
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return Array.from({ length: fallbackCount }, () => '1fr');
+    const parsed = parseInt(trimmed, 10);
+    if (Number.isFinite(parsed) && parsed > 0 && String(parsed) === trimmed) {
+      return Array.from({ length: parsed }, () => '1fr');
+    }
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    if (tokens.length > 0) return tokens;
+  }
+  return Array.from({ length: fallbackCount }, () => '1fr');
+};
+
+const resolveTrackSizes = (tokens: string[], available: number): number[] => {
+  const parsed = tokens.map((token) => {
+    const normalized = token.toLowerCase();
+    if (normalized.endsWith('fr')) {
+      const weight = Number.parseFloat(normalized.slice(0, -2));
+      return { kind: 'fr' as const, value: Number.isFinite(weight) && weight > 0 ? weight : 1 };
+    }
+    if (normalized.endsWith('%')) {
+      const percent = Number.parseFloat(normalized.slice(0, -1));
+      if (Number.isFinite(percent) && percent > 0) {
+        return { kind: 'px' as const, value: (available * percent) / 100 };
+      }
+    }
+    if (normalized === 'auto') {
+      return { kind: 'fr' as const, value: 1 };
+    }
+    const numeric = Number.parseFloat(normalized);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return { kind: 'px' as const, value: numeric };
+    }
+    return { kind: 'fr' as const, value: 1 };
+  });
+
+  const fixed = parsed.reduce((sum, track) => (track.kind === 'px' ? sum + track.value : sum), 0);
+  const frTotal = parsed.reduce((sum, track) => (track.kind === 'fr' ? sum + track.value : sum), 0);
+  const remaining = Math.max(0, available - fixed);
+
+  return parsed.map((track) => {
+    if (track.kind === 'px') return track.value;
+    if (frTotal <= 0) return 0;
+    return (remaining * track.value) / frTotal;
+  });
+};
+
+const packFlexLines = (
+  nodes: SceneNode[],
+  mainAxis: Axis,
+  crossAxis: Axis,
+  mainGap: number,
+  wrapLimit: number,
+  allowWrap: boolean
+): FlexLine[] => {
+  if (nodes.length === 0) return [];
+
+  const lines: FlexLine[] = [];
+  let current: FlexLine = { nodes: [], mainSize: 0, crossSize: 0 };
+
+  const pushCurrent = () => {
+    if (current.nodes.length > 0) lines.push(current);
+    current = { nodes: [], mainSize: 0, crossSize: 0 };
+  };
+
+  nodes.forEach((node) => {
+    const nodeMain = getAxisSize(node, mainAxis);
+    const nodeCross = getAxisSize(node, crossAxis);
+    const nextMain = current.nodes.length === 0 ? nodeMain : current.mainSize + mainGap + nodeMain;
+
+    const shouldWrap = allowWrap &&
+      current.nodes.length > 0 &&
+      Number.isFinite(wrapLimit) &&
+      nextMain > wrapLimit + 0.001;
+
+    if (shouldWrap) {
+      pushCurrent();
+    }
+
+    current.nodes.push(node);
+    current.mainSize = current.nodes.length === 1 ? nodeMain : current.mainSize + mainGap + nodeMain;
+    current.crossSize = Math.max(current.crossSize, nodeCross);
+  });
+
+  pushCurrent();
+  return lines;
+};
+
+const applyFillInLine = (
+  line: FlexLine,
+  mainAxis: Axis,
+  targetMainSize: number,
+  mainGap: number
+) => {
+  const fillNodes = line.nodes.filter((node) => getResizingMode(node, mainAxis) === 'fill');
+  if (fillNodes.length === 0) return;
+
+  const fixedMain = line.nodes
+    .filter((node) => getResizingMode(node, mainAxis) !== 'fill')
+    .reduce((sum, node) => sum + getAxisSize(node, mainAxis), 0);
+  const gapTotal = Math.max(0, line.nodes.length - 1) * mainGap;
+  const available = Math.max(0, targetMainSize - fixedMain - gapTotal);
+  const sizePerFill = available / fillNodes.length;
+
+  fillNodes.forEach((node) => {
+    setAxisSize(node, mainAxis, sizePerFill);
+  });
+
+  line.mainSize = line.nodes.reduce((sum, node, index) => {
+    return sum + getAxisSize(node, mainAxis) + (index > 0 ? mainGap : 0);
+  }, 0);
+};
+
+export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { frame: FrameNode; children: SceneNode[] } => {
   if (frame.layoutMode === 'none') return { frame, children };
 
-  const { padding, gap } = frame;
-  const layoutChildren = children.filter(c => !c.isAbsolute);
-  const absoluteChildren = children.filter(c => c.isAbsolute);
-
-  const updatedLayoutChildren = layoutChildren.map(c => ({ ...c }));
   const updatedFrame = { ...frame };
+  const rowGap = Number.isFinite(updatedFrame.rowGap) ? (updatedFrame.rowGap as number) : updatedFrame.gap;
+  const columnGap = Number.isFinite(updatedFrame.columnGap) ? (updatedFrame.columnGap as number) : updatedFrame.gap;
+  const layoutChildren = children.filter((child) => !child.isAbsolute).map((child) => ({ ...child }));
+  const absoluteChildren = children.filter((child) => child.isAbsolute);
 
-  const parseGridDimension = (value: number | string | undefined, fallback: number) => {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value);
-    if (typeof value === 'string') {
-      const parsed = parseInt(value, 10);
-      if (Number.isFinite(parsed) && parsed > 0) return parsed;
-      const tokens = value.split(/\s+/).filter(Boolean);
-      if (tokens.length > 0) return tokens.length;
+  const getInnerWidth = () => Math.max(0, updatedFrame.width - updatedFrame.padding.left - updatedFrame.padding.right);
+  const getInnerHeight = () => Math.max(0, updatedFrame.height - updatedFrame.padding.top - updatedFrame.padding.bottom);
+
+  layoutChildren.forEach((child) => {
+    if (child.type === 'text') {
+      const maxWidth = child.horizontalResizing === 'fixed' ? child.width : undefined;
+      measureTextNode(child, maxWidth);
     }
-    return fallback;
-  };
+    setAxisSize(child, 'horizontal', child.width);
+    setAxisSize(child, 'vertical', child.height);
+  });
 
-  const parseGridTracks = (value: number | string | undefined, fallbackCount: number): string[] => {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      return Array.from({ length: Math.floor(value) }, () => '1fr');
-    }
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) return Array.from({ length: fallbackCount }, () => '1fr');
-      const parsed = parseInt(trimmed, 10);
-      if (Number.isFinite(parsed) && parsed > 0 && String(parsed) === trimmed) {
-        return Array.from({ length: parsed }, () => '1fr');
-      }
-      const tokens = trimmed.split(/\s+/).filter(Boolean);
-      if (tokens.length > 0) return tokens;
-    }
-    return Array.from({ length: fallbackCount }, () => '1fr');
-  };
-
-  const resolveTrackSizes = (tokens: string[], available: number) => {
-    const parsed = tokens.map((token) => {
-      const normalized = token.toLowerCase();
-      if (normalized.endsWith('fr')) {
-        const weight = Number.parseFloat(normalized.slice(0, -2));
-        return { kind: 'fr' as const, value: Number.isFinite(weight) && weight > 0 ? weight : 1 };
-      }
-      if (normalized.endsWith('%')) {
-        const percent = Number.parseFloat(normalized.slice(0, -1));
-        if (Number.isFinite(percent) && percent > 0) {
-          return { kind: 'px' as const, value: (available * percent) / 100 };
-        }
-      }
-      if (normalized === 'auto') {
-        return { kind: 'fr' as const, value: 1 };
-      }
-      const numeric = Number.parseFloat(normalized);
-      if (Number.isFinite(numeric) && numeric > 0) {
-        return { kind: 'px' as const, value: numeric };
-      }
-      return { kind: 'fr' as const, value: 1 };
-    });
-
-    const fixed = parsed.reduce((sum, track) => (track.kind === 'px' ? sum + track.value : sum), 0);
-    const frTotal = parsed.reduce((sum, track) => (track.kind === 'fr' ? sum + track.value : sum), 0);
-    const remaining = Math.max(0, available - fixed);
-
-    return parsed.map((track) => {
-      if (track.kind === 'px') return track.value;
-      if (frTotal <= 0) return 0;
-      return (remaining * track.value) / frTotal;
-    });
-  };
-
-  const measureHugText = (child: SceneNode, maxWidth?: number) => {
-    if (child.type !== 'text') return;
-    const text = child as TextNode;
-    const metrics = measureText(text.text, text.fontSize, text.fontFamily, maxWidth, text.lineHeight);
-    if (child.horizontalResizing === 'hug') child.width = metrics.width;
-    if (child.verticalResizing === 'hug') child.height = metrics.height;
-  };
-
-  const getInnerWidth = () => Math.max(0, updatedFrame.width - padding.left - padding.right);
-  const getInnerHeight = () => Math.max(0, updatedFrame.height - padding.top - padding.bottom);
-
-  // Pass 1: Determine Widths
-  if (frame.layoutMode === 'horizontal') {
-    updatedLayoutChildren.forEach(child => {
-      if (child.horizontalResizing !== 'fill') measureHugText(child, child.horizontalResizing === 'fixed' ? child.width : undefined);
-    });
-
-    if (frame.horizontalResizing === 'hug') {
-      const childrenW = updatedLayoutChildren.reduce((sum, c) => sum + c.width, 0);
-      const totalGap = Math.max(0, updatedLayoutChildren.length - 1) * gap;
-      updatedFrame.width = childrenW + totalGap + padding.left + padding.right;
-    }
-
-    const fillableW = updatedLayoutChildren.filter(c => c.horizontalResizing === 'fill');
-    if (fillableW.length > 0) {
-      const totalGap = Math.max(0, updatedLayoutChildren.length - 1) * gap;
-      const fixedW = updatedLayoutChildren.filter(c => c.horizontalResizing !== 'fill').reduce((sum, c) => sum + c.width, 0);
-      const availableW = Math.max(0, getInnerWidth() - fixedW - totalGap);
-      const fillW = availableW / fillableW.length;
-      updatedLayoutChildren.forEach(child => {
-        if (child.horizontalResizing === 'fill') child.width = fillW;
-      });
-    }
-  } else if (frame.layoutMode === 'vertical') {
-    updatedLayoutChildren.forEach(child => {
-      if (child.horizontalResizing === 'hug' && child.type === 'text') {
-        measureHugText(child);
-      } else if (child.horizontalResizing === 'fill') {
-        child.width = getInnerWidth();
-      }
-    });
-
-    if (frame.horizontalResizing === 'hug') {
-      updatedFrame.width = Math.max(0, ...updatedLayoutChildren.map(c => c.width)) + padding.left + padding.right;
-    }
-    
-    if (frame.horizontalResizing === 'hug') {
-      updatedLayoutChildren.forEach(child => {
-        if (child.horizontalResizing === 'fill') {
-          child.width = getInnerWidth();
-        }
-      });
-    }
-  } else if (frame.layoutMode === 'grid') {
-    const itemCount = Math.max(1, updatedLayoutChildren.length);
-    const fallbackColumns = parseGridDimension(frame.gridColumns, Math.ceil(Math.sqrt(itemCount)));
-    const columnTracks = parseGridTracks(frame.gridColumns, fallbackColumns);
+  if (updatedFrame.layoutMode === 'grid') {
+    const itemCount = Math.max(1, layoutChildren.length);
+    const fallbackColumns = parseGridDimension(updatedFrame.gridColumns, Math.ceil(Math.sqrt(itemCount)));
+    const columnTracks = parseGridTracks(updatedFrame.gridColumns, fallbackColumns);
     const columns = Math.max(1, columnTracks.length);
-
-    const fallbackRows = parseGridDimension(frame.gridRows, Math.ceil(itemCount / columns));
-    const rowTracks = parseGridTracks(frame.gridRows, fallbackRows);
+    const fallbackRows = parseGridDimension(updatedFrame.gridRows, Math.ceil(itemCount / columns));
+    const rowTracks = parseGridTracks(updatedFrame.gridRows, fallbackRows);
     const rows = Math.max(1, Math.max(rowTracks.length, Math.ceil(itemCount / columns)));
-    const normalizedRowTracks = rowTracks.length >= rows
+    const normalizedRows = rowTracks.length >= rows
       ? rowTracks
       : [...rowTracks, ...Array.from({ length: rows - rowTracks.length }, () => '1fr')];
 
-    updatedLayoutChildren.forEach(child => {
-      if (child.horizontalResizing === 'hug') measureHugText(child);
-      if (child.verticalResizing === 'hug') measureHugText(child, child.width);
-    });
-
-    const maxChildWidth = Math.max(0, ...updatedLayoutChildren.map(c => c.width));
-    const maxChildHeight = Math.max(0, ...updatedLayoutChildren.map(c => c.height));
-
-    if (frame.horizontalResizing === 'hug') {
-      updatedFrame.width = padding.left + padding.right + columns * maxChildWidth + Math.max(0, columns - 1) * gap;
+    const maxChildWidth = Math.max(0, ...layoutChildren.map((child) => child.width));
+    const maxChildHeight = Math.max(0, ...layoutChildren.map((child) => child.height));
+    if (updatedFrame.horizontalResizing === 'hug') {
+      updatedFrame.width =
+        updatedFrame.padding.left +
+        updatedFrame.padding.right +
+        columns * maxChildWidth +
+        Math.max(0, columns - 1) * columnGap;
     }
-    if (frame.verticalResizing === 'hug') {
-      updatedFrame.height = padding.top + padding.bottom + rows * maxChildHeight + Math.max(0, rows - 1) * gap;
+    if (updatedFrame.verticalResizing === 'hug') {
+      updatedFrame.height =
+        updatedFrame.padding.top +
+        updatedFrame.padding.bottom +
+        rows * maxChildHeight +
+        Math.max(0, rows - 1) * rowGap;
     }
 
-    const availableGridWidth = Math.max(0, getInnerWidth() - Math.max(0, columns - 1) * gap);
-    const availableGridHeight = Math.max(0, getInnerHeight() - Math.max(0, rows - 1) * gap);
+    const availableGridWidth = Math.max(0, getInnerWidth() - Math.max(0, columns - 1) * columnGap);
+    const availableGridHeight = Math.max(0, getInnerHeight() - Math.max(0, rows - 1) * rowGap);
     const columnWidths = resolveTrackSizes(columnTracks, availableGridWidth);
-    const rowHeights = resolveTrackSizes(normalizedRowTracks, availableGridHeight);
+    const rowHeights = resolveTrackSizes(normalizedRows, availableGridHeight);
 
     const columnOffsets: number[] = [];
-    let runningX = padding.left;
-    for (let index = 0; index < columns; index++) {
+    let runningX = updatedFrame.padding.left;
+    for (let index = 0; index < columns; index += 1) {
       columnOffsets.push(runningX);
-      runningX += (columnWidths[index] || 0) + gap;
+      runningX += (columnWidths[index] || 0) + columnGap;
     }
 
     const rowOffsets: number[] = [];
-    let runningY = padding.top;
-    for (let index = 0; index < rows; index++) {
+    let runningY = updatedFrame.padding.top;
+    for (let index = 0; index < rows; index += 1) {
       rowOffsets.push(runningY);
-      runningY += (rowHeights[index] || 0) + gap;
+      runningY += (rowHeights[index] || 0) + rowGap;
     }
 
-    updatedLayoutChildren.forEach((child, index) => {
-      const col = index % columns;
+    layoutChildren.forEach((child, index) => {
+      const column = index % columns;
       const row = Math.floor(index / columns);
-      const cellW = columnWidths[col] || 0;
-      const cellH = rowHeights[row] || 0;
+      const cellWidth = columnWidths[column] || 0;
+      const cellHeight = rowHeights[row] || 0;
 
-      if (child.horizontalResizing === 'fill' || frame.alignItems === 'stretch') child.width = cellW;
-      if (child.verticalResizing === 'fill' || frame.alignItems === 'stretch') child.height = cellH;
-
+      if (child.horizontalResizing === 'fill' || updatedFrame.alignItems === 'stretch') {
+        setAxisSize(child, 'horizontal', cellWidth);
+      }
+      if (child.verticalResizing === 'fill' || updatedFrame.alignItems === 'stretch') {
+        setAxisSize(child, 'vertical', cellHeight);
+      }
       if (child.type === 'text' && child.verticalResizing === 'hug') {
-        const text = child as TextNode;
-        const wrapWidth = child.horizontalResizing === 'fill' ? cellW : child.width;
-        const metrics = measureText(text.text, text.fontSize, text.fontFamily, wrapWidth, text.lineHeight);
-        child.height = metrics.height;
+        measureTextNode(child, child.width);
       }
 
-      child.x = columnOffsets[col] || padding.left;
-      child.y = rowOffsets[row] || padding.top;
+      child.x = columnOffsets[column] || updatedFrame.padding.left;
+      child.y = rowOffsets[row] || updatedFrame.padding.top;
 
-      if (frame.alignItems === 'center' && child.horizontalResizing !== 'fill') {
-        child.x += (cellW - child.width) / 2;
-      } else if (frame.alignItems === 'end' && child.horizontalResizing !== 'fill') {
-        child.x += cellW - child.width;
+      if (updatedFrame.alignItems === 'center' && child.horizontalResizing !== 'fill') {
+        child.x += (cellWidth - child.width) / 2;
+      } else if (updatedFrame.alignItems === 'end' && child.horizontalResizing !== 'fill') {
+        child.x += cellWidth - child.width;
       }
     });
-  }
+  } else {
+    const isHorizontal = updatedFrame.layoutMode === 'horizontal';
+    const mainAxis: Axis = isHorizontal ? 'horizontal' : 'vertical';
+    const crossAxis: Axis = isHorizontal ? 'vertical' : 'horizontal';
+    const mainGap = isHorizontal ? columnGap : rowGap;
+    const crossGap = isHorizontal ? rowGap : columnGap;
+    const innerMainSize = isHorizontal ? getInnerWidth() : getInnerHeight();
+    const innerCrossSize = isHorizontal ? getInnerHeight() : getInnerWidth();
+    const frameMainResizing = isHorizontal ? updatedFrame.horizontalResizing : updatedFrame.verticalResizing;
+    const frameCrossResizing = isHorizontal ? updatedFrame.verticalResizing : updatedFrame.horizontalResizing;
+    const allowWrap = updatedFrame.layoutWrap === 'wrap';
+    const wrapLimit = allowWrap && frameMainResizing !== 'hug' ? innerMainSize : Number.POSITIVE_INFINITY;
 
-  // Pass 2: Determine Heights (now that widths are stable)
-  if (frame.layoutMode === 'vertical') {
-    updatedLayoutChildren.forEach(child => {
-      if (child.verticalResizing !== 'fill') {
-        if (child.type === 'text') measureHugText(child, child.width);
-      }
+    const lines = packFlexLines(layoutChildren, mainAxis, crossAxis, mainGap, wrapLimit, allowWrap);
+    const lineTargetMain = Number.isFinite(wrapLimit) ? wrapLimit : Math.max(0, ...lines.map((line) => line.mainSize), innerMainSize);
+    lines.forEach((line) => {
+      applyFillInLine(line, mainAxis, lineTargetMain, mainGap);
+      line.crossSize = Math.max(...line.nodes.map((node) => getAxisSize(node, crossAxis)), 0);
     });
 
-    if (frame.verticalResizing === 'hug') {
-      const childrenH = updatedLayoutChildren.filter(c => c.verticalResizing !== 'fill').reduce((sum, c) => sum + c.height, 0);
-      const totalGap = Math.max(0, updatedLayoutChildren.length - 1) * gap;
-      updatedFrame.height = childrenH + totalGap + padding.top + padding.bottom;
+    const maxLineMain = Math.max(...lines.map((line) => line.mainSize), 0);
+    const totalCross = lines.reduce((sum, line) => sum + line.crossSize, 0) + Math.max(0, lines.length - 1) * crossGap;
+
+    if (frameMainResizing === 'hug') {
+      const paddingMainStart = isHorizontal ? updatedFrame.padding.left : updatedFrame.padding.top;
+      const paddingMainEnd = isHorizontal ? updatedFrame.padding.right : updatedFrame.padding.bottom;
+      const nextMain = maxLineMain + paddingMainStart + paddingMainEnd;
+      if (isHorizontal) updatedFrame.width = Math.max(1, nextMain);
+      else updatedFrame.height = Math.max(1, nextMain);
     }
 
-    const fillableH = updatedLayoutChildren.filter(c => c.verticalResizing === 'fill');
-    if (fillableH.length > 0) {
-      const totalGap = Math.max(0, updatedLayoutChildren.length - 1) * gap;
-      const fixedH = updatedLayoutChildren.filter(c => c.verticalResizing !== 'fill').reduce((sum, c) => sum + c.height, 0);
-      const availableH = Math.max(0, getInnerHeight() - fixedH - totalGap);
-      const fillH = availableH / fillableH.length;
-      updatedLayoutChildren.forEach(child => {
-        if (child.verticalResizing === 'fill') child.height = fillH;
+    if (frameCrossResizing === 'hug') {
+      const paddingCrossStart = isHorizontal ? updatedFrame.padding.top : updatedFrame.padding.left;
+      const paddingCrossEnd = isHorizontal ? updatedFrame.padding.bottom : updatedFrame.padding.right;
+      const nextCross = totalCross + paddingCrossStart + paddingCrossEnd;
+      if (isHorizontal) updatedFrame.height = Math.max(1, nextCross);
+      else updatedFrame.width = Math.max(1, nextCross);
+    }
+
+    const finalInnerMain = isHorizontal ? getInnerWidth() : getInnerHeight();
+    const finalInnerCross = isHorizontal ? getInnerHeight() : getInnerWidth();
+    let lineGap = crossGap;
+    const lineCrossSizes = lines.map((line) => line.crossSize);
+    const baseCross = lineCrossSizes.reduce((sum, size) => sum + size, 0);
+    const crossSpace = Math.max(0, finalInnerCross - (baseCross + Math.max(0, lines.length - 1) * crossGap));
+    const alignContent = updatedFrame.alignContent || 'start';
+
+    let crossStart = 0;
+    if (alignContent === 'center') {
+      crossStart = crossSpace / 2;
+    } else if (alignContent === 'end') {
+      crossStart = crossSpace;
+    } else if (alignContent === 'space-between' && lines.length > 1) {
+      lineGap = crossGap + crossSpace / (lines.length - 1);
+    } else if (alignContent === 'stretch' && lines.length > 0) {
+      const extraPerLine = crossSpace / lines.length;
+      for (let index = 0; index < lineCrossSizes.length; index += 1) {
+        lineCrossSizes[index] += extraPerLine;
+      }
+    }
+
+    const mainOrigin = isHorizontal ? updatedFrame.padding.left : updatedFrame.padding.top;
+    const crossOrigin = isHorizontal ? updatedFrame.padding.top : updatedFrame.padding.left;
+    let cursorCross = crossOrigin + crossStart;
+
+    lines.forEach((line, lineIndex) => {
+      const lineCrossSize = lineCrossSizes[lineIndex] || line.crossSize;
+      const lineMainSize = line.mainSize;
+      let cursorMain = mainOrigin;
+      let effectiveGap = mainGap;
+
+      if (updatedFrame.justifyContent === 'center') {
+        cursorMain = mainOrigin + (finalInnerMain - lineMainSize) / 2;
+      } else if (updatedFrame.justifyContent === 'end') {
+        cursorMain = mainOrigin + (finalInnerMain - lineMainSize);
+      } else if (updatedFrame.justifyContent === 'space-between' && line.nodes.length > 1) {
+        const childrenMain = line.nodes.reduce((sum, node) => sum + getAxisSize(node, mainAxis), 0);
+        effectiveGap = Math.max(0, (finalInnerMain - childrenMain) / (line.nodes.length - 1));
+      }
+
+      line.nodes.forEach((node) => {
+        const childCrossResizing = getResizingMode(node, crossAxis);
+        const alignSelf = node.layoutAlignSelf && node.layoutAlignSelf !== 'auto'
+          ? node.layoutAlignSelf
+          : updatedFrame.alignItems;
+
+        if (alignSelf === 'stretch' || childCrossResizing === 'fill') {
+          setAxisSize(node, crossAxis, lineCrossSize);
+        }
+
+        const childMainSize = getAxisSize(node, mainAxis);
+        const childCrossSize = getAxisSize(node, crossAxis);
+
+        let crossOffset = 0;
+        if (alignSelf === 'center') {
+          crossOffset = (lineCrossSize - childCrossSize) / 2;
+        } else if (alignSelf === 'end') {
+          crossOffset = lineCrossSize - childCrossSize;
+        }
+
+        setAxisPosition(node, mainAxis, cursorMain);
+        setAxisPosition(node, crossAxis, cursorCross + crossOffset);
+        cursorMain += childMainSize + effectiveGap;
       });
-    }
-  } else if (frame.layoutMode === 'horizontal') {
-    updatedLayoutChildren.forEach(child => {
-      if (frame.alignItems === 'stretch' || child.verticalResizing === 'fill') child.height = getInnerHeight();
-      else if (child.verticalResizing === 'hug' && child.type === 'text') measureHugText(child, child.width);
-    });
 
-    if (frame.verticalResizing === 'hug') {
-      updatedFrame.height = Math.max(0, ...updatedLayoutChildren.map(c => c.height)) + padding.top + padding.bottom;
-    }
-
-    if (frame.verticalResizing === 'hug') {
-      updatedLayoutChildren.forEach(child => {
-        if (frame.alignItems === 'stretch' || child.verticalResizing === 'fill') child.height = getInnerHeight();
-      });
-    }
-  }
-
-  // Pass 3: Positioning
-  const totalW = updatedLayoutChildren.reduce((sum, c) => sum + c.width, 0);
-  const totalH = updatedLayoutChildren.reduce((sum, c) => sum + c.height, 0);
-  const totalG = Math.max(0, updatedLayoutChildren.length - 1) * gap;
-
-  if (frame.layoutMode === 'horizontal') {
-    let x = padding.left;
-    const availW = getInnerWidth();
-    let effectiveGap = gap;
-    
-    if (frame.justifyContent === 'center') x = padding.left + (availW - totalW - totalG) / 2;
-    else if (frame.justifyContent === 'end') x = padding.left + (availW - totalW - totalG);
-    else if (frame.justifyContent === 'space-between' && updatedLayoutChildren.length > 1) {
-      effectiveGap = Math.max(0, (availW - totalW) / (updatedLayoutChildren.length - 1));
-    }
-
-    updatedLayoutChildren.forEach(child => {
-      child.x = x;
-      if (frame.alignItems === 'center') child.y = padding.top + (updatedFrame.height - padding.top - padding.bottom - child.height) / 2;
-      else if (frame.alignItems === 'end') child.y = updatedFrame.height - padding.bottom - child.height;
-      else child.y = padding.top;
-      x += child.width + effectiveGap;
-    });
-  } else if (frame.layoutMode === 'vertical') {
-    let y = padding.top;
-    const availH = getInnerHeight();
-    let effectiveGap = gap;
-    
-    if (frame.justifyContent === 'center') y = padding.top + (availH - totalH - totalG) / 2;
-    else if (frame.justifyContent === 'end') y = padding.top + (availH - totalH - totalG);
-    else if (frame.justifyContent === 'space-between' && updatedLayoutChildren.length > 1) {
-      effectiveGap = Math.max(0, (availH - totalH) / (updatedLayoutChildren.length - 1));
-    }
-
-    updatedLayoutChildren.forEach(child => {
-      child.y = y;
-      if (frame.alignItems === 'center') child.x = padding.left + (updatedFrame.width - padding.left - padding.right - child.width) / 2;
-      else if (frame.alignItems === 'end') child.x = updatedFrame.width - padding.right - child.width;
-      else child.x = padding.left;
-      y += child.height + effectiveGap;
+      cursorCross += lineCrossSize + lineGap;
     });
   }
 
-  // Merge back
   const resultMap = new Map<string, SceneNode>();
-  updatedLayoutChildren.forEach(c => resultMap.set(c.id, c));
-  absoluteChildren.forEach(c => resultMap.set(c.id, c));
+  layoutChildren.forEach((child) => resultMap.set(child.id, child));
+  absoluteChildren.forEach((child) => resultMap.set(child.id, child));
 
-  const finalChildren = children.map(c => resultMap.get(c.id) || c);
-
-  return { frame: updatedFrame, children: finalChildren };
+  return {
+    frame: updatedFrame,
+    children: children.map((child) => resultMap.get(child.id) || child),
+  };
 };

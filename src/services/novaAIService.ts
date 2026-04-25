@@ -1,23 +1,19 @@
-import { GoogleGenAI } from "@google/genai";
+import { NovaLLMBinding } from "../engine/types";
+import { nodesToHtmlContext } from "../engine/context";
 import { AIMessage, Paint, SceneNode } from "../types";
 
-let aiClient: GoogleGenAI | null = null;
+let aiBinding: NovaLLMBinding | null = null;
 
-const getApiKey = (): string | undefined => {
-  const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  return key && key.trim().length > 0 ? key.trim() : undefined;
+export const setNovaAIBinding = (binding: NovaLLMBinding | null): void => {
+  aiBinding = binding;
 };
 
-const getAIClient = (): GoogleGenAI | null => {
-  if (aiClient) return aiClient;
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
-  aiClient = new GoogleGenAI({ apiKey });
-  return aiClient;
-};
+export const getNovaAIBinding = (): NovaLLMBinding | null => aiBinding;
+
+export const hasNovaAIBinding = (): boolean => aiBinding !== null;
 
 const MISSING_API_KEY_RESPONSE = `[MESSAGE]
-Nova AI is disabled because no Gemini API key is configured. Set NEXT_PUBLIC_GEMINI_API_KEY in your app environment to enable chat and image generation.
+Nova AI is disabled because no secure AI binding is configured. Provide a server-backed NovaLLMBinding with setNovaAIBinding(...); do not expose model API keys through NEXT_PUBLIC_* browser variables.
 [/MESSAGE]
 
 [HTML]
@@ -26,6 +22,13 @@ Nova AI is disabled because no Gemini API key is configured. Set NEXT_PUBLIC_GEM
 [TWEAKS]
 []
 [/TWEAKS]`;
+
+const getConfiguredBinding = (): NovaLLMBinding | null => aiBinding;
+
+const buildPromptWithContext = (prompt: string, contextNodes: SceneNode[]): string => {
+  if (contextNodes.length === 0) return prompt;
+  return `${prompt}\n\nCURRENT DESIGN CONTEXT (HTML):\n${nodesToHtmlContext(contextNodes)}`;
+};
 
 const toRgba = (color: string, opacity: number): string => {
   const safeOpacity = Math.min(1, Math.max(0, opacity));
@@ -178,24 +181,11 @@ You can target nested fill paths for advanced edits, such as:
 `;
 
 export const generateImage = async (prompt: string): Promise<string> => {
-  const ai = getAIClient();
-  if (!ai) return '';
+  const binding = getConfiguredBinding();
+  if (!binding?.generateImage) return '';
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [{ parts: [{ text: prompt }] }],
-      config: {
-          imageConfig: { aspectRatio: "1:1" }
-      }
-    });
-    
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:image/png;base64,${part.inlineData.data}`;
-      }
-    }
-    return '';
+    return await binding.generateImage(prompt);
   } catch (error) {
     console.error("Image Gen Error:", error);
     return '';
@@ -203,37 +193,29 @@ export const generateImage = async (prompt: string): Promise<string> => {
 };
 
 export const generateUI = async (prompt: string, history: AIMessage[] = [], contextNodes: SceneNode[] = []): Promise<string> => {
-  const ai = getAIClient();
-  if (!ai) {
+  const binding = getConfiguredBinding();
+  if (!binding) {
     return MISSING_API_KEY_RESPONSE;
   }
 
   try {
-    const contextHTML = contextNodes.length > 0 ? `\n\nCURRENT DESIGN CONTEXT (HTML):\n${nodesToHTMContext(contextNodes)}` : "";
-    
-    const contents = [
-        ...history.map(m => ({
-            role: m.role === 'user' ? 'user' : 'model',
-            parts: [{ text: m.content }]
+    const response = await binding.complete({
+      systemPrompt: SYSTEM_PROMPT,
+      messages: [
+        ...history.map((message) => ({
+          role: message.role,
+          content: message.content,
         })),
         {
-            role: 'user',
-            parts: [{ text: prompt + contextHTML }]
-        }
-    ];
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", 
-      contents,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.7,
-      },
+          role: 'user',
+          content: buildPromptWithContext(prompt, contextNodes),
+        },
+      ],
     });
 
-    return response.text || "";
+    return response || "";
   } catch (error) {
     console.error("Nova AI Error:", error);
-    return `[MESSAGE]\nNova AI request failed. Please check your Gemini key and network settings, then try again.\n[/MESSAGE]\n\n[HTML]\n[/HTML]\n\n[TWEAKS]\n[]\n[/TWEAKS]`;
+    return `[MESSAGE]\nNova AI request failed. Please check your binding configuration and network settings, then try again.\n[/MESSAGE]\n\n[HTML]\n[/HTML]\n\n[TWEAKS]\n[]\n[/TWEAKS]`;
   }
 };
