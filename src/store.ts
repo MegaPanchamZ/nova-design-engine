@@ -1314,6 +1314,9 @@ export const useStore = create<DesignStore>((set, get) => ({
       let newNodes = [...currentPage.nodes];
       const dragNode = newNodes.find(n => n.id === dragId);
       if (!dragNode) return state;
+      const movingSubtreeIds = collectSubtreeIds(currentPage.nodes, dragId);
+      const movingSubtree = currentPage.nodes.filter((node) => movingSubtreeIds.has(node.id));
+      if (movingSubtree.length === 0) return state;
 
       // Calculate new parent and index
       let newParentId: string | undefined;
@@ -1343,8 +1346,8 @@ export const useStore = create<DesignStore>((set, get) => ({
           return state;
       }
 
-      // 1. Remove node
-      newNodes = newNodes.filter(n => n.id !== dragId);
+      // 1. Remove subtree as a contiguous block while preserving descendants.
+      newNodes = newNodes.filter(n => !movingSubtreeIds.has(n.id));
       
       // 2. Adjust coordinates if parent changed
       // (This is skipped here for simplicity as the user specifically asked for SIDEBAR dragging,
@@ -1371,8 +1374,26 @@ export const useStore = create<DesignStore>((set, get) => ({
           y: (dragNode.y + oldGlobal.y) - newGlobal.y
       };
 
-      // 3. Insert at new index
-      newNodes.splice(Math.min(newIndex, newNodes.length), 0, movedNode);
+      const movedSubtree = movingSubtree.map((node) => node.id === dragId ? movedNode : node);
+
+      if (position === 'inside' && targetId !== 'root') {
+          const containerSubtree = collectSubtreeIds(newNodes, targetId);
+          const containerIndexes = newNodes
+              .map((node, index) => (containerSubtree.has(node.id) ? index : -1))
+              .filter((index) => index >= 0);
+          newIndex = containerIndexes.length > 0 ? Math.max(...containerIndexes) + 1 : newNodes.length;
+      } else if (targetId !== 'root') {
+          const targetSubtree = collectSubtreeIds(newNodes, targetId);
+          const targetIndexes = newNodes
+              .map((node, index) => (targetSubtree.has(node.id) ? index : -1))
+              .filter((index) => index >= 0);
+          if (targetIndexes.length > 0) {
+              newIndex = position === 'before' ? Math.min(...targetIndexes) : Math.max(...targetIndexes) + 1;
+          }
+      }
+
+      // 3. Insert subtree at new index.
+      newNodes.splice(Math.min(newIndex, newNodes.length), 0, ...movedSubtree);
 
       const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
       return { pages };

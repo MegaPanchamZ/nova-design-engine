@@ -13,15 +13,28 @@ const SUGGESTED_PROMPTS = [
 
 export interface NovaAIProps {
     className?: string;
+    isOpen?: boolean;
+    defaultOpen?: boolean;
+    onOpenChange?: (open: boolean) => void;
+    collapsedMode?: 'inline' | 'floating';
 }
 
-export const NovaAI = ({ className }: NovaAIProps = {}) => {
-    const [isOpen, setIsOpen] = useState(true);
+export const NovaAI = ({ className, isOpen: controlledOpen, defaultOpen = true, onOpenChange, collapsedMode = 'inline' }: NovaAIProps = {}) => {
+    const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
     const [prompt, setPrompt] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
+    const isOpen = controlledOpen ?? uncontrolledOpen;
+
+    const setOpenState = (nextOpen: boolean | ((prev: boolean) => boolean)) => {
+        const resolved = typeof nextOpen === 'function' ? (nextOpen as (prev: boolean) => boolean)(isOpen) : nextOpen;
+        if (controlledOpen === undefined) {
+            setUncontrolledOpen(resolved);
+        }
+        onOpenChange?.(resolved);
+    };
     
     const { aiHistory, sendAIChat, selectedIds, aiTweaks, updateNode, pages, currentPageId } = useStore();
 
@@ -102,12 +115,12 @@ export const NovaAI = ({ className }: NovaAIProps = {}) => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
                 e.preventDefault();
-                setIsOpen(prev => !prev);
+                setOpenState(prev => !prev);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, []);
+    }, [isOpen]);
 
     useEffect(() => {
         if (chatContainerRef.current) {
@@ -136,13 +149,36 @@ export const NovaAI = ({ className }: NovaAIProps = {}) => {
     };
 
     if (!isOpen) {
+        if (collapsedMode === 'floating') {
+            return (
+                <button 
+                    onClick={() => setOpenState(true)}
+                    className="absolute bottom-6 right-[270px] z-[900] bg-indigo-600 hover:bg-indigo-500 text-white w-10 h-10 rounded-full shadow-2xl flex items-center justify-center transition-all hover:scale-110 active:scale-95 group overflow-hidden border-2 border-indigo-400/20"
+                >
+                    <Sparkles size={18} />
+                </button>
+            );
+        }
+
         return (
-            <button 
-                onClick={() => setIsOpen(true)}
-                className="absolute bottom-6 right-[270px] z-[900] bg-indigo-600 hover:bg-indigo-500 text-white w-10 h-10 rounded-full shadow-2xl flex items-center justify-center transition-all hover:scale-110 active:scale-95 group overflow-hidden border-2 border-indigo-400/20"
-            >
-                <Sparkles size={18} />
-            </button>
+            <aside id="nova-ai-panel" className={`bg-[#111111] flex h-full w-full min-h-0 items-center justify-center overflow-hidden select-none ${className || ''}`.trim()}>
+                <div className="mx-4 flex w-full max-w-sm flex-col items-center justify-center gap-4 rounded-2xl border border-white/8 bg-[#141414] px-6 py-6 text-center shadow-[0_24px_60px_rgba(0,0,0,0.28)]">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-500/12 text-indigo-400">
+                        <Sparkles size={18} />
+                    </div>
+                    <div className="space-y-1">
+                        <p className="text-[11px] font-black uppercase tracking-[0.24em] text-[#EDEDED]">Assistant Minimized</p>
+                        <p className="text-[11px] leading-relaxed text-[#8B8B8B]">Reopen Nova AI to continue design chat, image generation, and tweak controls.</p>
+                    </div>
+                    <button
+                        onClick={() => setOpenState(true)}
+                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition-all hover:bg-indigo-500"
+                    >
+                        <Sparkles size={12} />
+                        Reopen Assistant
+                    </button>
+                </div>
+            </aside>
         );
     }
 
@@ -161,7 +197,7 @@ export const NovaAI = ({ className }: NovaAIProps = {}) => {
                     >
                         <Trash2 size={12} />
                     </button>
-                    <button onClick={() => setIsOpen(false)} className="text-[#555] hover:text-white transition-colors">
+                    <button onClick={() => setOpenState(false)} className="text-[#555] hover:text-white transition-colors">
                         <X size={14} />
                     </button>
                 </div>

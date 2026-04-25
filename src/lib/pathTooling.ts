@@ -101,6 +101,20 @@ export const serializePathData = (anchors: PathAnchor[], closed: boolean): strin
   return path;
 };
 
+export const scalePathData = (data: string, scaleX: number, scaleY: number): string => {
+  const parsed = parsePathData(data);
+  if (parsed.anchors.length === 0) return data;
+
+  const scaledAnchors = parsed.anchors.map((anchor) => ({
+    x: anchor.x * scaleX,
+    y: anchor.y * scaleY,
+    cpIn: anchor.cpIn ? { x: anchor.cpIn.x * scaleX, y: anchor.cpIn.y * scaleY } : undefined,
+    cpOut: anchor.cpOut ? { x: anchor.cpOut.x * scaleX, y: anchor.cpOut.y * scaleY } : undefined,
+  }));
+
+  return serializePathData(scaledAnchors, parsed.closed);
+};
+
 export const pointToSegmentDistance = (
   point: PathPoint,
   start: PathPoint,

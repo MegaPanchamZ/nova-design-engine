@@ -1,16 +1,12 @@
 import React from 'react';
 import { NovaEditorComposer } from './NovaEditorComposer';
+import type { NovaTheme } from './NovaThemeProvider';
 
-export interface NovaEditorShellProps {
+export interface NovaEditorShellProps extends NovaTheme {
   className?: string;
   showChat?: boolean;
   leftPanelWidth?: number;
   rightPanelWidth?: number;
-  accentColor?: string;
-  panelBackgroundColor?: string;
-  borderColor?: string;
-  canvasBackgroundColor?: string;
-  textColor?: string;
 }
 
 export const NovaEditorShell = ({
@@ -18,6 +14,7 @@ export const NovaEditorShell = ({
   showChat = true,
   leftPanelWidth = 280,
   rightPanelWidth = 320,
+  mode,
   accentColor,
   panelBackgroundColor,
   borderColor,
@@ -30,6 +27,7 @@ export const NovaEditorShell = ({
       showAssistant={showChat}
       leftPanelWidth={leftPanelWidth}
       rightPanelWidth={rightPanelWidth}
+      mode={mode}
       accentColor={accentColor}
       panelBackgroundColor={panelBackgroundColor}
       borderColor={borderColor}

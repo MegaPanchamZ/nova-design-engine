@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { exportToCode } from '../lib/codeExport';
 import { ColorPickerDialog, FillEditorDialog } from './FillEditorDialog';
 import { ModeTabs } from './ModeTabs';
+import { FlowReorderDirection, getAutoLayoutReorderInstruction } from '../lib/layerHierarchy';
 
 export interface PropertiesPanelProps {
     className?: string;
@@ -105,7 +106,7 @@ const CenterVerticalIcon = ({ size, className, strokeWidth = 2 }: { size: number
 );
 
 export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPanelProps) => {
-    const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected, createComponentFromSelection, createInstanceFromComponent, createVariantFromComponent, switchInstanceVariant } = useStore();
+    const { pages, currentPageId, selectedIds, updateNode, addNode, deleteNodes, pushHistory, setSelectedIds, mode, setMode, variables, addVariable, selectMatching, alignSelected, groupSelected, createComponentFromSelection, createInstanceFromComponent, createVariantFromComponent, switchInstanceVariant, moveNodeHierarchy } = useStore();
   const [expandedPadding, setExpandedPadding] = useState(false);
   const [expandedRadius, setExpandedRadius] = useState(false);
     const [exportScale, setExportScale] = useState('1x');
@@ -131,10 +132,23 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
     const instanceCountForSelectedComponent = selectedComponentNode
         ? nodes.filter((node) => node.type === 'instance' && node.masterId === selectedComponentNode.id).length
         : 0;
+    const isFrameLikeNode = (node: SceneNode) => ['frame', 'section', 'group', 'component', 'instance'].includes(node.type);
     const selectedFrameNode = selectedNode && ['frame', 'section', 'group', 'component', 'instance'].includes(selectedNode.type) ? (selectedNode as FrameNode) : null;
     const selectedTextNode = selectedNode?.type === 'text' ? (selectedNode as TextNode) : null;
-
-    const isFrameLikeNode = (node: SceneNode) => ['frame', 'section', 'group', 'component', 'instance'].includes(node.type);
+    const selectedParentNode = selectedNode?.parentId ? nodes.find((node) => node.id === selectedNode.parentId) : undefined;
+    const selectedParentFrame = selectedParentNode && isFrameLikeNode(selectedParentNode) ? (selectedParentNode as FrameNode) : null;
+    const isInAutoLayoutParent = !!selectedParentFrame && selectedParentFrame.layoutMode !== 'none';
+    const autoLayoutFlowSiblings = selectedParentFrame
+        ? nodes.filter((node) => node.parentId === selectedParentFrame.id && !node.isAbsolute)
+        : [];
+    const selectedAutoLayoutFlowIndex = selectedNode ? autoLayoutFlowSiblings.findIndex((node) => node.id === selectedNode.id) : -1;
+    const autoLayoutParentLayoutMode = selectedParentFrame?.layoutMode || 'none';
+    const autoLayoutParentIsFlex = autoLayoutParentLayoutMode === 'horizontal' || autoLayoutParentLayoutMode === 'vertical';
+    const autoLayoutParentPrimaryAxis = autoLayoutParentLayoutMode === 'vertical' ? 'vertical' : 'horizontal';
+    const autoLayoutParentSecondaryAxis = autoLayoutParentPrimaryAxis === 'horizontal' ? 'vertical' : 'horizontal';
+    const hasWrappedAutoLayoutParent = autoLayoutParentIsFlex && selectedParentFrame?.layoutWrap === 'wrap';
+    const selectedFrameRowGap = selectedFrameNode ? (typeof selectedFrameNode.rowGap === 'number' ? selectedFrameNode.rowGap : selectedFrameNode.gap) : 0;
+    const selectedFrameColumnGap = selectedFrameNode ? (typeof selectedFrameNode.columnGap === 'number' ? selectedFrameNode.columnGap : selectedFrameNode.gap) : 0;
     const normalizeHexColor = (value: string) => /^#[0-9a-fA-F]{6}$/.test(value) ? value : '#D9D9D9';
     const getNodeDisplayColor = (node: SceneNode) => {
         const visibleSolid = [...(node.fills || [])].reverse().find((paint) => paint.type === 'solid' && paint.visible !== false);
@@ -346,6 +360,47 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
   const handleBlur = () => {
     pushHistory();
   };
+
+    const updateAutoLayoutChildSizingMode = (axis: 'primary' | 'secondary', value: 'fixed' | 'hug' | 'fill') => {
+        if (!selectedNode || !selectedParentFrame) return;
+        const resolvedAxis = autoLayoutParentLayoutMode === 'grid'
+            ? (axis === 'primary' ? 'horizontal' : 'vertical')
+            : (axis === 'primary' ? autoLayoutParentPrimaryAxis : autoLayoutParentSecondaryAxis);
+        handleChange(resolvedAxis === 'horizontal' ? 'horizontalResizing' : 'verticalResizing', value);
+        pushHistory();
+    };
+
+    const getAutoLayoutChildSizingMode = (axis: 'primary' | 'secondary'): 'fixed' | 'hug' | 'fill' => {
+        if (!selectedNode || !selectedParentFrame) return 'fixed';
+        const resolvedAxis = autoLayoutParentLayoutMode === 'grid'
+            ? (axis === 'primary' ? 'horizontal' : 'vertical')
+            : (axis === 'primary' ? autoLayoutParentPrimaryAxis : autoLayoutParentSecondaryAxis);
+        return resolvedAxis === 'horizontal' ? selectedNode.horizontalResizing : selectedNode.verticalResizing;
+    };
+
+    const moveSelectedWithinAutoLayout = (direction: FlowReorderDirection) => {
+        if (!selectedNode || selectedNode.isAbsolute) return;
+        const instruction = getAutoLayoutReorderInstruction(autoLayoutFlowSiblings, selectedNode.id, direction);
+        if (!instruction) return;
+        moveNodeHierarchy(selectedNode.id, instruction.targetId, instruction.position);
+        pushHistory();
+    };
+
+    const resetAutoLayoutChildSettings = () => {
+        if (!selectedNode) return;
+        updateNode(selectedNode.id, {
+            isAbsolute: false,
+            layoutAlignSelf: 'auto',
+            layoutBasis: 'auto',
+            layoutGrow: 0,
+            layoutShrink: 1,
+            minWidth: 0,
+            maxWidth: Number.POSITIVE_INFINITY,
+            minHeight: 0,
+            maxHeight: Number.POSITIVE_INFINITY,
+        });
+        pushHistory();
+    };
 
         const openFillEditor = (index = 0) => {
                 setFillEditorStartIndex(index);
@@ -1321,6 +1376,71 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
                         </div>
                     )}
 
+                    {(selectedNode as FrameNode).layoutMode !== 'none' && (
+                        <div className="grid grid-cols-2 gap-2">
+                            <InputField
+                                value={selectedFrameRowGap}
+                                onChange={(v) => handleChange('rowGap', parseNonNegativeInt(v))}
+                                onBlur={handleBlur}
+                                suffix="px"
+                                prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Row Gap</span>}
+                            />
+                            <InputField
+                                value={selectedFrameColumnGap}
+                                onChange={(v) => handleChange('columnGap', parseNonNegativeInt(v))}
+                                onBlur={handleBlur}
+                                suffix="px"
+                                prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Col Gap</span>}
+                            />
+                        </div>
+                    )}
+
+                    {((selectedNode as FrameNode).layoutMode === 'horizontal' || (selectedNode as FrameNode).layoutMode === 'vertical') && (
+                        <div className="grid grid-cols-2 gap-2">
+                            <select
+                                value={(selectedNode as FrameNode).layoutWrap || 'nowrap'}
+                                onChange={(e) => {
+                                    handleChange('layoutWrap', e.target.value);
+                                    pushHistory();
+                                }}
+                                className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                            >
+                                <option value="nowrap">No Wrap</option>
+                                <option value="wrap">Wrap</option>
+                            </select>
+                            <select
+                                value={(selectedNode as FrameNode).alignContent || 'start'}
+                                onChange={(e) => {
+                                    handleChange('alignContent', e.target.value);
+                                    pushHistory();
+                                }}
+                                className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                            >
+                                <option value="start">Lines: Start</option>
+                                <option value="center">Lines: Center</option>
+                                <option value="end">Lines: End</option>
+                                <option value="space-between">Lines: Space Between</option>
+                                <option value="stretch">Lines: Stretch</option>
+                            </select>
+                        </div>
+                    )}
+
+                    <div className="flex items-center justify-between rounded-sm bg-[#171717] border border-[#2A2A2A] px-3 py-2">
+                        <span className="text-[10px] text-[#888] font-bold uppercase tracking-widest">Clip Content</span>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={(selectedNode as FrameNode).clipsContent}
+                                onChange={(e) => {
+                                    handleChange('clipsContent', e.target.checked);
+                                    pushHistory();
+                                }}
+                                className="sr-only peer"
+                            />
+                            <div className="w-8 h-4 bg-[#2C2C2C] rounded-full peer-checked:bg-indigo-600 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:h-3 after:w-3 after:rounded-full after:bg-[#888] after:transition-all peer-checked:after:bg-white"></div>
+                        </label>
+                    </div>
+
                     <div className="space-y-2 pt-2 border-t border-[#2A2A2A]">
                         <div className="grid grid-cols-2 gap-2">
                             <InputField
@@ -1367,6 +1487,202 @@ export const PropertiesPanel = ({ className, modeTabsAccentColor }: PropertiesPa
                                 />
                             </div>
                         )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {selectedNodes.length === 1 && isInAutoLayoutParent && (
+            <div id="auto-layout-child-controls" className="border-b border-[#2A2A2A] pb-4">
+                <SectionHeader title="Auto Layout Child" actions={
+                    <button
+                        onClick={resetAutoLayoutChildSettings}
+                        className="px-2 h-6 rounded-sm border border-[#3A3A3A] text-[9px] uppercase tracking-widest text-[#AAA] hover:text-white hover:border-indigo-500/60"
+                    >
+                        Reset
+                    </button>
+                } />
+                <div className="px-4 space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                        <div className="rounded-sm border border-[#2A2A2A] bg-[#171717] px-3 py-2">
+                            <div className="text-[9px] uppercase tracking-widest text-[#666] font-bold">Parent Flow</div>
+                            <div className="mt-1 text-[11px] text-[#EDEDED] font-medium capitalize">
+                                {autoLayoutParentLayoutMode}
+                                {hasWrappedAutoLayoutParent ? ' · wrap' : ''}
+                            </div>
+                        </div>
+                        <div className="rounded-sm border border-[#2A2A2A] bg-[#171717] px-3 py-2">
+                            <div className="text-[9px] uppercase tracking-widest text-[#666] font-bold">Flow Order</div>
+                            <div className="mt-1 text-[11px] text-[#EDEDED] font-medium">
+                                {selectedNode.isAbsolute || selectedAutoLayoutFlowIndex < 0
+                                    ? 'Absolute'
+                                    : `${selectedAutoLayoutFlowIndex + 1} / ${autoLayoutFlowSiblings.length}`}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-sm bg-[#171717] border border-[#2A2A2A] px-3 py-2">
+                        <span className="text-[10px] text-[#888] font-bold uppercase tracking-widest">Absolute Position</span>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={!!selectedNode.isAbsolute}
+                                onChange={(e) => {
+                                    handleChange('isAbsolute', e.target.checked);
+                                    pushHistory();
+                                }}
+                                className="sr-only peer"
+                            />
+                            <div className="w-8 h-4 bg-[#2C2C2C] rounded-full peer-checked:bg-indigo-600 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:h-3 after:w-3 after:rounded-full after:bg-[#888] after:transition-all peer-checked:after:bg-white"></div>
+                        </label>
+                    </div>
+
+                    {!selectedNode.isAbsolute && (
+                        <>
+                            <div className="grid grid-cols-2 gap-2">
+                                <select
+                                    value={getAutoLayoutChildSizingMode('primary')}
+                                    onChange={(e) => updateAutoLayoutChildSizingMode('primary', e.target.value as 'fixed' | 'hug' | 'fill')}
+                                    className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                                >
+                                    <option value="fixed">{autoLayoutParentIsFlex ? 'Main Axis' : 'Width'}: Fixed</option>
+                                    <option value="hug">{autoLayoutParentIsFlex ? 'Main Axis' : 'Width'}: Hug</option>
+                                    <option value="fill">{autoLayoutParentIsFlex ? 'Main Axis' : 'Width'}: Fill</option>
+                                </select>
+                                <select
+                                    value={getAutoLayoutChildSizingMode('secondary')}
+                                    onChange={(e) => updateAutoLayoutChildSizingMode('secondary', e.target.value as 'fixed' | 'hug' | 'fill')}
+                                    className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                                >
+                                    <option value="fixed">{autoLayoutParentIsFlex ? 'Cross Axis' : 'Height'}: Fixed</option>
+                                    <option value="hug">{autoLayoutParentIsFlex ? 'Cross Axis' : 'Height'}: Hug</option>
+                                    <option value="fill">{autoLayoutParentIsFlex ? 'Cross Axis' : 'Height'}: Fill</option>
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-4 gap-2">
+                                {[
+                                    { label: 'First', direction: 'first' as FlowReorderDirection, disabled: selectedAutoLayoutFlowIndex <= 0 },
+                                    { label: 'Back', direction: 'backward' as FlowReorderDirection, disabled: selectedAutoLayoutFlowIndex <= 0 },
+                                    { label: 'Next', direction: 'forward' as FlowReorderDirection, disabled: selectedAutoLayoutFlowIndex < 0 || selectedAutoLayoutFlowIndex >= autoLayoutFlowSiblings.length - 1 },
+                                    { label: 'Last', direction: 'last' as FlowReorderDirection, disabled: selectedAutoLayoutFlowIndex < 0 || selectedAutoLayoutFlowIndex >= autoLayoutFlowSiblings.length - 1 },
+                                ].map((item) => (
+                                    <button
+                                        key={item.direction}
+                                        onClick={() => moveSelectedWithinAutoLayout(item.direction)}
+                                        disabled={item.disabled}
+                                        className="h-7 rounded-sm border border-[#3A3A3A] text-[9px] uppercase tracking-widest text-[#D5D5D5] disabled:opacity-40 hover:bg-[#2C2C2C]"
+                                    >
+                                        {item.label}
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="rounded-sm border border-[#2A2A2A] bg-[#171717] px-3 py-2 text-[10px] text-[#8E8E8E] leading-4">
+                                {autoLayoutParentLayoutMode === 'grid'
+                                    ? 'Grid children fill rows and columns in source order. Use these controls to move this child through the grid sequence.'
+                                    : hasWrappedAutoLayoutParent
+                                        ? 'Wrapped rows are still resolved from source order. Reordering here changes which line the child lands in as space wraps.'
+                                        : 'Flow order follows source order inside the parent stack.'}
+                            </div>
+
+                            {autoLayoutFlowSiblings.length > 1 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                    {autoLayoutFlowSiblings.slice(0, 10).map((sibling, index) => (
+                                        <button
+                                            key={sibling.id}
+                                            onClick={() => setSelectedIds([sibling.id])}
+                                            className={`rounded-sm border px-2 py-1 text-[9px] uppercase tracking-wide transition-colors ${
+                                                sibling.id === selectedNode.id
+                                                    ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-100'
+                                                    : 'border-[#2A2A2A] bg-[#171717] text-[#9B9B9B] hover:text-[#EDEDED] hover:border-[#3A3A3A]'
+                                            }`}
+                                        >
+                                            {index + 1}. {sibling.name}
+                                        </button>
+                                    ))}
+                                    {autoLayoutFlowSiblings.length > 10 && (
+                                        <div className="rounded-sm border border-[#2A2A2A] bg-[#171717] px-2 py-1 text-[9px] uppercase tracking-wide text-[#666]">
+                                            +{autoLayoutFlowSiblings.length - 10} more
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                        <select
+                            value={selectedNode.layoutAlignSelf || 'auto'}
+                            onChange={(e) => {
+                                handleChange('layoutAlignSelf', e.target.value);
+                                pushHistory();
+                            }}
+                            className="bg-[#2C2C2C] text-[10px] text-[#EDEDED] rounded-sm px-1.5 h-7 outline-none border border-transparent focus:border-indigo-500/50"
+                        >
+                            <option value="auto">Align Self: Auto</option>
+                            <option value="start">Align Self: Start</option>
+                            <option value="center">Align Self: Center</option>
+                            <option value="end">Align Self: End</option>
+                            <option value="stretch">Align Self: Stretch</option>
+                        </select>
+                        <InputField
+                            value={selectedNode.layoutBasis === 'auto' ? 'auto' : selectedNode.layoutBasis ?? 'auto'}
+                            onChange={(v) => {
+                                const trimmed = v.trim().toLowerCase();
+                                handleChange('layoutBasis', trimmed === '' || trimmed === 'auto' ? 'auto' : parseNonNegativeInt(trimmed));
+                            }}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Basis</span>}
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                        <InputField
+                            value={selectedNode.layoutGrow ?? 0}
+                            onChange={(v) => handleChange('layoutGrow', parseNonNegativeInt(v))}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Grow</span>}
+                        />
+                        <InputField
+                            value={selectedNode.layoutShrink ?? 1}
+                            onChange={(v) => handleChange('layoutShrink', parseNonNegativeInt(v))}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Shrink</span>}
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                        <InputField
+                            value={selectedNode.minWidth ?? 0}
+                            onChange={(v) => handleChange('minWidth', parseNonNegativeInt(v))}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Min W</span>}
+                        />
+                        <InputField
+                            value={Number.isFinite(selectedNode.maxWidth) ? selectedNode.maxWidth || 0 : ''}
+                            onChange={(v) => {
+                                const trimmed = v.trim();
+                                handleChange('maxWidth', trimmed ? parseNonNegativeInt(trimmed) : Number.POSITIVE_INFINITY);
+                            }}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Max W</span>}
+                        />
+                        <InputField
+                            value={selectedNode.minHeight ?? 0}
+                            onChange={(v) => handleChange('minHeight', parseNonNegativeInt(v))}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Min H</span>}
+                        />
+                        <InputField
+                            value={Number.isFinite(selectedNode.maxHeight) ? selectedNode.maxHeight || 0 : ''}
+                            onChange={(v) => {
+                                const trimmed = v.trim();
+                                handleChange('maxHeight', trimmed ? parseNonNegativeInt(trimmed) : Number.POSITIVE_INFINITY);
+                            }}
+                            onBlur={handleBlur}
+                            prefix={<span className="text-[10px] text-[#888] font-bold px-1 tracking-tighter">Max H</span>}
+                        />
                     </div>
                 </div>
             </div>

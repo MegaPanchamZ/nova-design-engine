@@ -12,17 +12,22 @@ import {
   moveAnchorWithHandles,
   moveControlHandle,
   parsePathData,
+  scalePathData,
   serializePathData,
   toggleAnchorCurve,
 } from '../lib/pathTooling';
 import type { PathAnchor } from '../lib/pathTooling';
 import { buildMaskingRuns } from '../lib/masking';
+import { scaleSceneNode } from '../lib/nodeTransforms';
+import { isDrawingTool as isRegisteredDrawingTool, isSelectionTool, matchToolShortcut } from '../lib/toolRegistry';
+import type { DrawingToolType } from '../lib/toolRegistry';
+import { computeViewportForZoomBox, getSelectableHitStack, normalizeCanvasRect, resolveDirectSelectCycle } from '../lib/toolSemantics';
+import type { DirectSelectCycleState } from '../lib/toolSemantics';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
 type CanvasMouseEvent = Konva.KonvaEventObject<MouseEvent>;
 type CanvasWheelEvent = Konva.KonvaEventObject<WheelEvent>;
-type DrawingTool = Extract<ToolType, 'rect' | 'circle' | 'ellipse' | 'text' | 'frame' | 'section' | 'image'>;
 
 interface ContextMenuState {
   x: number;
@@ -162,7 +167,7 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps }: KonvaImage
 
 export const Canvas = () => {
   const { 
-    pages, currentPageId, selectedIds, viewport, tool, setViewport, 
+    pages, currentPageId, selectedIds, viewport, tool, setTool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
     deleteNodes, groupSelected, frameSelected, copySelected, pasteCopied, canPaste, updateGuide, removeGuide, variables
   } = useStore();
@@ -173,6 +178,7 @@ export const Canvas = () => {
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
+  const directSelectCycleRef = useRef<DirectSelectCycleState | null>(null);
   const [dimensions, setDimensions] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1280,
     height: typeof window !== 'undefined' ? window.innerHeight : 720,
@@ -192,15 +198,40 @@ export const Canvas = () => {
   const [penPoints, setPenPoints] = useState<PenPoint[]>([]);
   const [isPenDragging, setIsPenDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  const [spaceHandActive, setSpaceHandActive] = useState(false);
+  const [zoomRect, setZoomRect] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
+  const [directSelectHoverIds, setDirectSelectHoverIds] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [selectedPathAnchor, setSelectedPathAnchor] = useState<{ nodeId: string; index: number } | null>(null);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
+  const canvasCursor = isPanning
+    ? 'grabbing'
+    : (tool === 'hand' || spaceHandActive)
+      ? 'grab'
+      : tool === 'zoom'
+        ? (altHeld ? 'zoom-out' : 'zoom-in')
+        : (isRegisteredDrawingTool(tool) || tool === 'pen')
+          ? 'crosshair'
+          : 'default';
 
   useEffect(() => {
     window.canvasStage = stageRef.current || undefined;
   }, []);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    stage.container().style.cursor = canvasCursor;
+  }, [canvasCursor]);
+
+  useEffect(() => {
+    if (tool !== 'direct-select') {
+      directSelectCycleRef.current = null;
+      setDirectSelectHoverIds([]);
+    }
+  }, [tool]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -216,9 +247,49 @@ export const Canvas = () => {
     return () => observer.disconnect();
   }, []);
 
+  const isTypingFieldFocused = () => {
+    const active = document.activeElement as HTMLElement | null;
+    const activeTag = active?.tagName?.toLowerCase();
+    return !!active && (active.isContentEditable || activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select');
+  };
+
+  const zoomAtPointer = (pointer: { x: number; y: number }, zoomIn: boolean) => {
+    const scaleBy = 1.15;
+    const oldScale = viewport.zoom;
+    const mousePointTo = {
+      x: (pointer.x - viewport.x) / oldScale,
+      y: (pointer.y - viewport.y) / oldScale,
+    };
+
+    let newScale = zoomIn ? oldScale * scaleBy : oldScale / scaleBy;
+    newScale = Math.min(Math.max(newScale, 0.05), 20);
+
+    setViewport({
+      zoom: newScale,
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    });
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === 'Alt') setAltHeld(true);
+        if (!isTypingFieldFocused() && e.code === 'Space') {
+          e.preventDefault();
+          setSpaceHandActive(true);
+          return;
+        }
+        if (!isTypingFieldFocused()) {
+          const shortcutTool = matchToolShortcut(e);
+          if (shortcutTool) {
+            e.preventDefault();
+            if (shortcutTool !== 'pen' && penPoints.length > 0) setPenPoints([]);
+            setSelectedPathAnchor(null);
+            setTool(shortcutTool);
+            return;
+          }
+        }
+
         if (e.key === '.' || e.key === 'Decimal') {
             zoomToFitSelected();
         }
@@ -286,6 +357,10 @@ export const Canvas = () => {
       if (e.key === 'Escape') {
         setContextMenu(null);
         setSelectedPathAnchor(null);
+        directSelectCycleRef.current = null;
+        if (penPoints.length > 0) {
+          setPenPoints([]);
+        }
       }
 
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPathAnchor) {
@@ -306,13 +381,7 @@ export const Canvas = () => {
       }
 
       if ((e.key === 'Delete' || e.key === 'Backspace') && mode !== 'prototype' && !editingId && selectedIds.length > 0) {
-        const active = document.activeElement as HTMLElement | null;
-        const activeTag = active?.tagName?.toLowerCase();
-        const typingFieldFocused =
-          !!active &&
-          (active.isContentEditable || activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select');
-
-        if (!typingFieldFocused) {
+        if (!isTypingFieldFocused()) {
           e.preventDefault();
           deleteNodes(selectedIds);
           setSelectedIds([]);
@@ -323,6 +392,7 @@ export const Canvas = () => {
     };
     const handleKeyUp = (e: KeyboardEvent) => {
         if (e.key === 'Alt') setAltHeld(false);
+      if (e.code === 'Space') setSpaceHandActive(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -330,7 +400,7 @@ export const Canvas = () => {
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [editingId, mode, nodes, pushHistory, selectedIds, selectedPathAnchor, setSnapLines, updateNode, viewport.zoom]);
+  }, [deleteNodes, editingId, mode, nodes, penPoints.length, pushHistory, selectedIds, selectedPathAnchor, setSnapLines, setTool, updateNode, viewport.zoom]);
 
   // Tool Tool Handlers
 
@@ -463,6 +533,54 @@ export const Canvas = () => {
     };
 
     return ids.filter((nodeId) => !hasSelectedAncestor(nodeId));
+  };
+
+  const collectDescendantIds = (rootId: string): string[] => {
+    const children = nodes.filter((node) => node.parentId === rootId);
+    return children.flatMap((child) => [child.id, ...collectDescendantIds(child.id)]);
+  };
+
+  const buildScalePatch = (originalNode: SceneNode, scaledNode: SceneNode, includePosition: boolean): Partial<SceneNode> => {
+    const patch: Partial<SceneNode> & {
+      data?: PathNode['data'];
+      fontSize?: TextNode['fontSize'];
+      lineHeight?: TextNode['lineHeight'];
+      imageTransform?: ImageNode['imageTransform'];
+      radiusX?: number;
+      radiusY?: number;
+    } = {
+      width: scaledNode.width,
+      height: scaledNode.height,
+      strokeWidth: scaledNode.strokeWidth,
+      cornerRadius: scaledNode.cornerRadius,
+      individualCornerRadius: scaledNode.individualCornerRadius,
+      effects: scaledNode.effects,
+    };
+
+    if (includePosition) {
+      patch.x = scaledNode.x;
+      patch.y = scaledNode.y;
+    }
+
+    if (scaledNode.type === 'path' && originalNode.type === 'path') {
+      patch.data = scaledNode.data;
+    }
+
+    if (scaledNode.type === 'text' && originalNode.type === 'text') {
+      patch.fontSize = scaledNode.fontSize;
+      patch.lineHeight = scaledNode.lineHeight;
+    }
+
+    if (scaledNode.type === 'image' && originalNode.type === 'image') {
+      patch.imageTransform = scaledNode.imageTransform;
+    }
+
+    if (scaledNode.type === 'ellipse' && originalNode.type === 'ellipse') {
+      patch.radiusX = scaledNode.radiusX;
+      patch.radiusY = scaledNode.radiusY;
+    }
+
+    return patch;
   };
 
   // Handle selection Transformer
@@ -692,7 +810,7 @@ export const Canvas = () => {
     }
 
     // Middle Mouse Button (button 1) for panning
-    if (e.evt.button === 1 || tool === 'hand') {
+    if (e.evt.button === 1 || tool === 'hand' || spaceHandActive) {
       setIsPanning(true);
       const stage = stageRef.current;
       if (stage) {
@@ -713,8 +831,13 @@ export const Canvas = () => {
     }
 
     const clickedOnStage = e.target === e.target.getStage();
-    const drawingTools: DrawingTool[] = ['rect', 'circle', 'ellipse', 'text', 'frame', 'section', 'image'];
-    const isDrawingTool = drawingTools.includes(tool as DrawingTool);
+    const isActiveDrawingTool = isRegisteredDrawingTool(tool);
+
+    if (tool === 'zoom') {
+      const { x, y } = getPointerPosition();
+      setZoomRect({ x, y, width: 0, height: 0 });
+      return;
+    }
 
     // If text tool and clicked on existing text, edit it instead of creating new
     if (tool === 'text' && !clickedOnStage) {
@@ -725,8 +848,8 @@ export const Canvas = () => {
             return;
         }
     }
-    if (clickedOnStage || isDrawingTool || tool === 'pen' || tool === 'select') {
-      if (isDrawingTool) {
+    if (clickedOnStage || isActiveDrawingTool || tool === 'pen' || isSelectionTool(tool)) {
+      if (isActiveDrawingTool) {
         const { x, y } = getPointerPosition();
         const parentId = findInnermostFrame(x, y);
         let finalX = x;
@@ -738,7 +861,7 @@ export const Canvas = () => {
             finalY -= parentPos.y;
         }
 
-        const node = createDefaultNode(tool as DrawingTool, finalX, finalY);
+        const node = createDefaultNode(tool as DrawingToolType, finalX, finalY);
         node.parentId = parentId;
         node.width = 0;
         node.height = 0;
@@ -763,7 +886,7 @@ export const Canvas = () => {
         
         setIsPenDragging(true);
         setPenPoints([...penPoints, { x, y, cp1: {x, y}, cp2: {x, y} }]);
-      } else if (tool === 'select') {
+      } else if (isSelectionTool(tool)) {
         const id = e.target.id();
         const clickedFrame = nodes.find(n => n.id === id && (n.type === 'frame' || n.type === 'section'));
         
@@ -771,10 +894,12 @@ export const Canvas = () => {
             const { x, y } = getPointerPosition();
             setSelectionRect({ x, y, width: 0, height: 0 });
             setSelectedIds([]);
+          directSelectCycleRef.current = null;
           setSelectedPathAnchor(null);
         } else if (clickedFrame) {
             if (e.evt.shiftKey) setSelectedIds(Array.from(new Set([...selectedIds, clickedFrame.id])));
             else setSelectedIds([clickedFrame.id]);
+          directSelectCycleRef.current = null;
           setSelectedPathAnchor(null);
         }
       }
@@ -787,6 +912,7 @@ export const Canvas = () => {
     if (!stage) return;
 
     if (isPanning) {
+        if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
         const dx = e.evt.movementX;
         const dy = e.evt.movementY;
         setViewport({
@@ -798,6 +924,7 @@ export const Canvas = () => {
     }
 
     if (tool === 'pen' && isPenDragging) {
+      if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
         const { x, y } = getPointerPosition();
         const newPoints = [...penPoints];
         const last = newPoints[newPoints.length - 1];
@@ -858,6 +985,24 @@ export const Canvas = () => {
         width: x - selectionRect.x,
         height: y - selectionRect.y
       });
+    } else if (zoomRect) {
+      const { x, y } = getPointerPosition();
+      setZoomRect({
+        ...zoomRect,
+        width: x - zoomRect.x,
+        height: y - zoomRect.y,
+      });
+    } else if (tool === 'direct-select') {
+      const point = getPointerPosition();
+      const hits = getSelectableHitStack(nodes, point).map((node) => node.id);
+      setDirectSelectHoverIds((current) => {
+        if (current.length === hits.length && current.every((id, index) => id === hits[index])) {
+          return current;
+        }
+        return hits;
+      });
+    } else if (directSelectHoverIds.length > 0) {
+      setDirectSelectHoverIds([]);
     }
   };
 
@@ -866,11 +1011,29 @@ export const Canvas = () => {
         setIsPanning(false);
         const stage = stageRef.current;
         if (stage) {
-            stage.container().style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
+        stage.container().style.cursor = canvasCursor;
         }
     }
     if (isPenDragging) {
         setIsPenDragging(false);
+    }
+
+    if (zoomRect) {
+      const normalizedZoomRect = normalizeCanvasRect(zoomRect);
+      const clickThreshold = 8 / viewport.zoom;
+      const stage = stageRef.current;
+
+      if (normalizedZoomRect.width < clickThreshold || normalizedZoomRect.height < clickThreshold) {
+        const pointer = stage?.getPointerPosition();
+        if (pointer) {
+          zoomAtPointer(pointer, !altHeld);
+        }
+      } else {
+        setViewport(computeViewportForZoomBox(normalizedZoomRect, dimensions, viewport));
+      }
+
+      setZoomRect(null);
+      return;
     }
 
     if (isDrawing && newNode) {
@@ -1127,6 +1290,8 @@ export const Canvas = () => {
 
     const newWidth = clampSize(Math.abs(konvaNode.width() * konvaNode.scaleX()), Math.abs(nodeData.width));
     const newHeight = clampSize(Math.abs(konvaNode.height() * konvaNode.scaleY()), Math.abs(nodeData.height));
+  const scaleFactorX = newWidth / Math.max(1, Math.abs(nodeData.width));
+  const scaleFactorY = newHeight / Math.max(1, Math.abs(nodeData.height));
     const isCenterAnchored = nodeData.type === 'circle' || nodeData.type === 'ellipse';
     const anchorOffsetX = isCenterAnchored ? newWidth / 2 : 0;
     const anchorOffsetY = isCenterAnchored ? newHeight / 2 : 0;
@@ -1165,7 +1330,7 @@ export const Canvas = () => {
 
     const wasResized = Math.abs(newWidth - nodeData.width) > 0.1 || Math.abs(newHeight - nodeData.height) > 0.1;
 
-    updateNode(nodeId, {
+    const nextRootPatch: Partial<SceneNode> & { data?: PathNode['data'] } = {
       x: clampCoord(finalX, nodeData.x),
       y: clampCoord(finalY, nodeData.y),
       parentId: newParentId,
@@ -1174,11 +1339,45 @@ export const Canvas = () => {
       rotation: konvaNode.rotation(),
       scaleX: 1,
       scaleY: 1,
-      ...(wasResized ? { 
-          horizontalResizing: 'fixed', 
-          verticalResizing: 'fixed' 
+      ...(wasResized ? {
+        horizontalResizing: 'fixed',
+        verticalResizing: 'fixed'
       } : {})
-    });
+    };
+
+    if (isTransformEvent && wasResized && nodeData.type === 'path') {
+      Object.assign(nextRootPatch, { data: scalePathData(nodeData.data, scaleFactorX, scaleFactorY) });
+    }
+
+    if (isTransformEvent && wasResized && tool === 'scale') {
+      const scaledRootNode = scaleSceneNode(nodeData, scaleFactorX, scaleFactorY, {
+        scalePosition: false,
+        scaleText: true,
+        scaleStyle: true,
+      });
+      Object.assign(nextRootPatch, buildScalePatch(nodeData, scaledRootNode, false));
+      nextRootPatch.x = clampCoord(finalX, nodeData.x);
+      nextRootPatch.y = clampCoord(finalY, nodeData.y);
+      nextRootPatch.parentId = newParentId;
+      nextRootPatch.rotation = konvaNode.rotation();
+      nextRootPatch.scaleX = 1;
+      nextRootPatch.scaleY = 1;
+    }
+
+    updateNode(nodeId, nextRootPatch);
+
+    if (isTransformEvent && wasResized && tool === 'scale') {
+      collectDescendantIds(nodeId).forEach((descendantId) => {
+        const descendant = nodes.find((node) => node.id === descendantId);
+        if (!descendant) return;
+        const scaledDescendant = scaleSceneNode(descendant, scaleFactorX, scaleFactorY, {
+          scalePosition: true,
+          scaleText: true,
+          scaleStyle: true,
+        });
+        updateNode(descendantId, buildScalePatch(descendant, scaledDescendant, true));
+      });
+    }
 
     if (isTransformEvent) {
       konvaNode.scaleX(1);
@@ -1357,7 +1556,7 @@ export const Canvas = () => {
         !isPanning &&
         (mode === 'prototype'
           ? (node.interactions || []).some((interaction) => interaction.trigger === 'onDrag')
-          : tool === 'select'),
+          : isSelectionTool(tool)),
       listening: node.visible,
       dash: node.isMask ? [8 / viewport.zoom, 4 / viewport.zoom] : undefined,
       cornerRadius: cornerRadiusArray,
@@ -1408,6 +1607,21 @@ export const Canvas = () => {
         }
 
         e.cancelBubble = true;
+        if (tool === 'direct-select') {
+          const point = getPointerPosition();
+          const cycle = resolveDirectSelectCycle(nodes, point, directSelectCycleRef.current);
+          directSelectCycleRef.current = cycle.cycle;
+          if (cycle.node) {
+            if (e.evt.shiftKey) {
+              setSelectedIds(Array.from(new Set([...selectedIds, cycle.node.id])));
+            } else {
+              setSelectedIds([cycle.node.id]);
+            }
+            setSelectedPathAnchor(null);
+            return;
+          }
+        }
+        directSelectCycleRef.current = null;
         if (e.evt.shiftKey) {
           setSelectedIds(Array.from(new Set([...selectedIds, node.id])));
         } else {
@@ -2262,10 +2476,105 @@ export const Canvas = () => {
     });
   };
 
+  const renderDirectSelectHoverOutlines = () => {
+    if (tool !== 'direct-select' || directSelectHoverIds.length === 0) return null;
+
+    const cycleIds = directSelectCycleRef.current?.candidateIds || [];
+    const cycleMatchesHover = cycleIds.length === directSelectHoverIds.length && cycleIds.every((id, index) => id === directSelectHoverIds[index]);
+    const activeCycleId = cycleMatchesHover && directSelectCycleRef.current
+      ? directSelectHoverIds[directSelectCycleRef.current.index] || directSelectHoverIds[0]
+      : directSelectHoverIds[0];
+
+    return directSelectHoverIds
+      .map((id) => nodes.find((node) => node.id === id))
+      .filter((node): node is SceneNode => Boolean(node))
+      .map((node) => {
+        const global = getGlobalPosition(node.id);
+        const cornerData = getSanitizedCornerData(node);
+        const highlightColor = node.type === 'component' || node.type === 'instance' ? '#A855F7' : '#14B8A6';
+        const isActiveCycle = node.id === activeCycleId;
+        const strokeWidth = (isActiveCycle ? 2 : 1) / viewport.zoom;
+        const opacity = isActiveCycle ? 1 : 0.65;
+        const commonProps = {
+          key: `direct-select-hover-${node.id}`,
+          stroke: highlightColor,
+          strokeWidth,
+          opacity,
+          listening: false,
+          dash: isActiveCycle ? undefined : [4 / viewport.zoom, 3 / viewport.zoom],
+        };
+
+        if (node.type === 'circle') {
+          return (
+            <Circle
+              {...commonProps}
+              x={global.x + Math.abs(node.width / 2)}
+              y={global.y + Math.abs(node.width / 2)}
+              radius={Math.abs(node.width / 2)}
+              fillEnabled={false}
+            />
+          );
+        }
+
+        if (node.type === 'ellipse') {
+          return (
+            <Ellipse
+              {...commonProps}
+              x={global.x + Math.abs(node.width / 2)}
+              y={global.y + Math.abs(node.height / 2)}
+              radiusX={Math.abs(node.width / 2)}
+              radiusY={Math.abs(node.height / 2)}
+              fillEnabled={false}
+            />
+          );
+        }
+
+        if (node.type === 'path') {
+          return (
+            <Path
+              {...commonProps}
+              x={global.x}
+              y={global.y}
+              rotation={node.rotation}
+              data={node.data}
+              fillEnabled={false}
+            />
+          );
+        }
+
+        if (cornerData.smoothing > 0) {
+          return (
+            <Path
+              {...commonProps}
+              x={global.x}
+              y={global.y}
+              rotation={node.rotation}
+              data={getSuperellipsePath(node.width, node.height, cornerData.uniform, cornerData.smoothing)}
+              fillEnabled={false}
+            />
+          );
+        }
+
+        return (
+          <Rect
+            {...commonProps}
+            x={global.x}
+            y={global.y}
+            width={node.width}
+            height={node.height}
+            rotation={node.rotation}
+            cornerRadius={cornerData.cornerRadiusArray}
+            fillEnabled={false}
+          />
+        );
+      });
+  };
+
   return (
     <div
       id="canvas-container"
-      className={`flex-1 bg-[#1A1A1A] relative overflow-hidden h-full ${tool === 'hand' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+      className="flex-1 bg-[#1A1A1A] relative overflow-hidden h-full"
+      style={{ cursor: canvasCursor }}
       onClick={() => setContextMenu(null)}
     >
        {/* Rulers */}
@@ -2298,11 +2607,13 @@ export const Canvas = () => {
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
           onContextMenu={handleCanvasContextMenu}
+          onMouseLeave={() => setDirectSelectHoverIds([])}
           onDblClick={(e) => tool === 'pen' && finalizePenPath()}
           draggable={false}
         >
           <Layer>
             {renderNodeHierarchy()}
+            {renderDirectSelectHoverOutlines()}
 
             {/* Creation Preview */}
             {newNode && (
@@ -2436,12 +2747,27 @@ export const Canvas = () => {
               />
             )}
 
+            {zoomRect && (
+              <Rect
+                x={zoomRect.x}
+                y={zoomRect.y}
+                width={zoomRect.width}
+                height={zoomRect.height}
+                fill="rgba(16, 185, 129, 0.12)"
+                stroke="#10B981"
+                strokeWidth={1 / viewport.zoom}
+                dash={[6, 4]}
+              />
+            )}
+
             {/* Selection Transformer */}
-            {tool === 'select' && (
+            {(tool === 'select' || tool === 'scale') && (
               <Transformer
                 ref={transformerRef}
-                keepRatio={false}
-                centeredScaling={false}
+                keepRatio={tool === 'scale'}
+                centeredScaling={altHeld}
+                rotateEnabled={tool !== 'scale'}
+                enabledAnchors={tool === 'scale' ? ['top-left', 'top-right', 'bottom-left', 'bottom-right'] : undefined}
                 shiftBehavior="inverted"
                 boundBoxFunc={(oldBox, newBox) => {
                   if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) return oldBox;

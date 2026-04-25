@@ -5,6 +5,8 @@ import { Camera, ChevronDown, Circle, Download, FileCode, Hand, Image, Layout, M
 import { useStore } from '../store';
 import { ToolType } from '../types';
 import { exportToPDF, exportToSVG, triggerDownload } from '../services/exportService';
+import { getToolDefinition, getToolGroupForTool, TOOL_GROUPS } from '../lib/toolRegistry';
+import type { ToolGroupId } from '../lib/toolRegistry';
 
 declare global {
   interface Window {
@@ -21,66 +23,50 @@ interface ToolOption {
   shortcut: string;
 }
 
-interface ToolGroup {
-  id: 'cursor' | 'shape' | 'container' | 'draw' | 'view';
+interface ToolbarGroup {
+  id: ToolGroupId;
   label: string;
   options: ToolOption[];
 }
 
-const TOOL_GROUPS: ToolGroup[] = [
-  {
-    id: 'cursor',
-    label: 'Select',
-    options: [
-      { id: 'select', icon: MousePointer2, label: 'Select', shortcut: 'V' },
-      { id: 'direct-select', icon: MousePointer, label: 'Direct Select', shortcut: 'A' },
-      { id: 'scale', icon: Maximize, label: 'Scale', shortcut: 'K' },
-    ],
-  },
-  {
-    id: 'shape',
-    label: 'Shapes',
-    options: [
-      { id: 'rect', icon: Square, label: 'Rectangle', shortcut: 'R' },
-      { id: 'circle', icon: Circle, label: 'Circle', shortcut: 'O' },
-      { id: 'ellipse', icon: Circle, label: 'Ellipse', shortcut: 'E' },
-    ],
-  },
-  {
-    id: 'container',
-    label: 'Containers',
-    options: [
-      { id: 'frame', icon: Layout, label: 'Frame', shortcut: 'F' },
-      { id: 'section', icon: Layout, label: 'Section', shortcut: 'S' },
-    ],
-  },
-  {
-    id: 'draw',
-    label: 'Draw',
-    options: [
-      { id: 'pen', icon: PenTool, label: 'Pen', shortcut: 'P' },
-      { id: 'text', icon: Type, label: 'Text', shortcut: 'T' },
-      { id: 'image', icon: Image, label: 'Image', shortcut: 'I' },
-    ],
-  },
-  {
-    id: 'view',
-    label: 'View',
-    options: [
-      { id: 'hand', icon: Hand, label: 'Hand', shortcut: 'H' },
-      { id: 'zoom', icon: ZoomIn, label: 'Zoom', shortcut: 'Z' },
-    ],
-  },
-];
+const TOOL_ICONS: Record<ToolType, LucideIcon> = {
+  select: MousePointer2,
+  'direct-select': MousePointer,
+  scale: Maximize,
+  rect: Square,
+  circle: Circle,
+  ellipse: Circle,
+  frame: Layout,
+  section: Layout,
+  pen: PenTool,
+  text: Type,
+  image: Image,
+  hand: Hand,
+  zoom: ZoomIn,
+};
 
 export const Toolbar = () => {
   const { pages, currentPageId, tool, setTool, undo, redo, historyIndex, history } = useStore();
   const dockRef = useRef<HTMLDivElement | null>(null);
-  const [openGroup, setOpenGroup] = useState<ToolGroup['id'] | null>(null);
+  const [openGroup, setOpenGroup] = useState<ToolGroupId | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   const currentPage = pages.find(p => p.id === currentPageId);
+  const toolbarGroups = useMemo<ToolbarGroup[]>(() => {
+    return TOOL_GROUPS.map((group) => ({
+      ...group,
+      options: group.toolIds.map((toolId) => {
+        const definition = getToolDefinition(toolId);
+        return {
+          id: definition.id,
+          icon: TOOL_ICONS[definition.id],
+          label: definition.label,
+          shortcut: definition.shortcutLabel,
+        } as ToolOption;
+      }),
+    }));
+  }, []);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -133,13 +119,15 @@ export const Toolbar = () => {
   };
 
   const activeToolByGroup = useMemo(() => {
-    const result = new Map<ToolGroup['id'], ToolOption>();
-    TOOL_GROUPS.forEach((group) => {
+    const result = new Map<ToolGroupId, ToolOption>();
+    toolbarGroups.forEach((group) => {
       const selected = group.options.find((option) => option.id === tool) || group.options[0];
       result.set(group.id, selected);
     });
     return result;
-  }, [tool]);
+  }, [tool, toolbarGroups]);
+
+  const currentToolGroup = getToolGroupForTool(tool).id;
 
   return (
     <div className="absolute bottom-4 left-1/2 z-30 -translate-x-1/2">
@@ -170,25 +158,30 @@ export const Toolbar = () => {
 
           <div className="mx-1 h-5 w-px bg-[#2A2A2A]" />
 
-          {TOOL_GROUPS.map((group) => {
+          {toolbarGroups.map((group) => {
             const active = activeToolByGroup.get(group.id) || group.options[0];
             const ActiveIcon = active.icon;
             const isOpen = openGroup === group.id;
+            const isCurrentGroup = currentToolGroup === group.id;
 
             return (
               <div key={group.id} className="relative">
                 <button
                   id={`tool-group-${group.id}`}
                   onClick={() => {
-                    setOpenGroup((prev) => (prev === group.id ? null : group.id));
+                    setOpenGroup((prev: ToolGroupId | null) => (prev === group.id ? null : group.id));
                     setShowExportMenu(false);
                   }}
                   className={`flex h-8 items-center gap-1.5 rounded-lg border px-2 text-xs transition-colors ${
-                    isOpen ? 'border-indigo-500/50 bg-indigo-600/20 text-white' : 'border-transparent bg-transparent text-[#C4C4C4] hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white'
+                    isOpen || isCurrentGroup
+                      ? 'border-indigo-500/50 bg-indigo-600/20 text-white'
+                      : 'border-transparent bg-transparent text-[#C4C4C4] hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white'
                   }`}
-                  title={`${group.label} tools`}
+                  title={`${active.label} (${active.shortcut})`}
                 >
                   <ActiveIcon size={14} />
+                  <span className="max-w-[84px] truncate">{active.label}</span>
+                  <span className="font-mono text-[10px] uppercase opacity-60">{active.shortcut}</span>
                   <ChevronDown size={11} className={`opacity-50 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
                 </button>
 

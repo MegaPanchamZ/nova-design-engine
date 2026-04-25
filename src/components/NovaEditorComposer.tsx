@@ -33,6 +33,7 @@ export const NovaEditorComposer = ({
   leftPanelWidth = 280,
   rightPanelWidth = 320,
   showAssistant = true,
+  mode,
   accentColor,
   panelBackgroundColor,
   borderColor,
@@ -64,6 +65,7 @@ export const NovaEditorComposer = ({
   return (
     <NovaThemeProvider
       className={className}
+      mode={mode}
       accentColor={accentColor}
       panelBackgroundColor={panelBackgroundColor}
       borderColor={borderColor}

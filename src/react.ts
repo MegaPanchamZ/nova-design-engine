@@ -16,7 +16,7 @@ export type { PropertiesPanelProps } from './components/PropertiesPanel';
 export type { NovaEditorShellProps } from './components/NovaEditorShell';
 
 export { NovaThemeProvider } from './components/NovaThemeProvider';
-export type { NovaThemeProviderProps, NovaTheme } from './components/NovaThemeProvider';
+export type { NovaColorMode, NovaThemeProviderProps, NovaTheme } from './components/NovaThemeProvider';
 
 export type { NovaAIProps } from './components/NovaAI';
 export { getNovaAIBinding, hasNovaAIBinding, setNovaAIBinding } from './services/novaAIService';

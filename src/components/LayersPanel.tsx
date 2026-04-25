@@ -5,6 +5,8 @@ import { SceneNode, createDefaultNode, Page } from '../types';
 import {
   DndContext,
   closestCenter,
+        DragCancelEvent,
+        DragOverEvent,
     DragEndEvent,
     DragStartEvent,
   KeyboardSensor,
@@ -22,6 +24,7 @@ import {
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { getLayerDropPosition, isHierarchyContainerNode, LayerDropPosition } from '../lib/layerHierarchy';
 
 interface SortableLayerProps {
     key?: React.Key;
@@ -32,9 +35,10 @@ interface SortableLayerProps {
     onToggleVisibility: (id: string, visible: boolean) => void;
     onToggleLock: (id: string, locked: boolean) => void;
     onToggleCollapse: (id: string, collapsed: boolean) => void;
+    dropPosition: LayerDropPosition | null;
 }
 
-const SortableLayer = ({ node, depth, isSelected, onSelect, onToggleVisibility, onToggleLock, onToggleCollapse }: SortableLayerProps) => {
+const SortableLayer = ({ node, depth, isSelected, onSelect, onToggleVisibility, onToggleLock, onToggleCollapse, dropPosition }: SortableLayerProps) => {
     const [isEditing, setIsEditing] = useState(false);
     const [name, setName] = useState(node.name || node.type);
     const inputRef = React.useRef<HTMLInputElement>(null);
@@ -86,6 +90,7 @@ const SortableLayer = ({ node, depth, isSelected, onSelect, onToggleVisibility, 
     };
 
     const hasChildren = useStore.getState().pages.find(p => p.id === useStore.getState().currentPageId)?.nodes.some(n => n.parentId === node.id);
+    const dropIndicatorLeft = `${depth * 16 + 30}px`;
 
     return (
         <div
@@ -98,11 +103,28 @@ const SortableLayer = ({ node, depth, isSelected, onSelect, onToggleVisibility, 
             onMouseEnter={() => useStore.getState().setHoveredId(node.id)}
             onMouseLeave={() => useStore.getState().setHoveredId(null)}
             className={`group py-1 flex items-center gap-2 cursor-pointer border-r-2 transition-all relative ${
+                dropPosition === 'inside'
+                    ? 'bg-indigo-500/10 border-indigo-500 text-indigo-100'
+                    :
                 isSelected
                     ? 'bg-indigo-600/20 border-indigo-500 text-indigo-100'
                     : 'border-transparent text-[#A1A1A1] hover:bg-[#2A2A2A]/50 hover:text-[#EDEDED]'
             }`}
         >
+            {dropPosition === 'before' && (
+                <div className="absolute top-0 right-2 h-0.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.6)]" style={{ left: dropIndicatorLeft }} />
+            )}
+            {dropPosition === 'after' && (
+                <div className="absolute bottom-0 right-2 h-0.5 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.6)]" style={{ left: dropIndicatorLeft }} />
+            )}
+            {dropPosition === 'inside' && (
+                <>
+                    <div className="absolute inset-y-0 right-2 rounded-sm border border-indigo-500/60 bg-indigo-500/5 pointer-events-none" style={{ left: dropIndicatorLeft }} />
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 rounded bg-indigo-500/15 px-1.5 py-0.5 text-[8px] uppercase tracking-widest text-indigo-200 pointer-events-none">
+                        Nest
+                    </span>
+                </>
+            )}
             {depth > 0 && (
                 <div 
                     className="absolute top-0 bottom-0 w-px bg-[#2A2A2A]" 
@@ -250,6 +272,7 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
   const { pages, setPages, updatePage, currentPageId, setPage, addPage, selectedIds, setSelectedIds, updateNode, addNode, pushHistory, moveNodeHierarchy } = useStore();
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [activePageId, setActivePageId] = useState<string | null>(null);
+    const [dropIndicator, setDropIndicator] = useState<{ targetId: string; position: LayerDropPosition } | null>(null);
 
   const currentPage = pages.find(p => p.id === currentPageId);
   const nodes = currentPage?.nodes || [];
@@ -292,8 +315,18 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
 
   const flattened = getFlattenedNodes();
 
+    const isNodeDescendant = (ancestorId: string, candidateId: string | undefined): boolean => {
+        let currentId = candidateId;
+        while (currentId) {
+            if (currentId === ancestorId) return true;
+            currentId = nodes.find((node) => node.id === currentId)?.parentId;
+        }
+        return false;
+    };
+
     const handleDragStartAll = (event: DragStartEvent) => {
         const id = String(event.active.id);
+        setDropIndicator(null);
     if (pages.some(p => p.id === id)) {
         setActivePageId(id);
     } else {
@@ -301,10 +334,47 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
     }
   };
 
+    const handleDragOverAll = (event: DragOverEvent) => {
+        if (!activeLayerId || !event.over) {
+            setDropIndicator(null);
+            return;
+        }
+
+        const overId = String(event.over.id);
+        const targetNode = nodes.find((node) => node.id === overId);
+        if (!targetNode) {
+            setDropIndicator(null);
+            return;
+        }
+
+        const translatedRect = event.active.rect.current.translated;
+        const activeCenterY = translatedRect
+            ? translatedRect.top + translatedRect.height / 2
+            : event.over.rect.top + event.over.rect.height / 2;
+
+        let position = getLayerDropPosition(targetNode, event.over.rect.top, event.over.rect.height, activeCenterY);
+        if (position === 'inside' && isNodeDescendant(activeLayerId, overId)) {
+            position = activeCenterY < event.over.rect.top + event.over.rect.height / 2 ? 'before' : 'after';
+        }
+
+        if (overId === activeLayerId) {
+            setDropIndicator(null);
+            return;
+        }
+
+        setDropIndicator({ targetId: overId, position });
+    };
+
+    const clearDragState = (_event?: DragCancelEvent | DragEndEvent) => {
+        setActiveLayerId(null);
+        setActivePageId(null);
+        setDropIndicator(null);
+    };
+
     const handleDragEndAll = (event: DragEndEvent) => {
     const { active, over } = event;
-    setActiveLayerId(null);
-    setActivePageId(null);
+    const nextDropIndicator = dropIndicator;
+    clearDragState(event);
 
     if (!over) return;
 
@@ -320,22 +390,32 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
         }
     } else {
         // Layer Reordering
-        if (active.id !== over.id) {
+        if (active.id !== over.id || nextDropIndicator?.position === 'inside') {
             const dragId = String(active.id);
-            const targetId = String(over.id);
+            const targetId = nextDropIndicator?.targetId || String(over.id);
+            const position = nextDropIndicator?.position;
             const targetNode = nodes.find(n => n.id === targetId);
 
-            if (targetNode?.type === 'frame') {
-                moveNodeHierarchy(dragId, targetId, 'inside');
+            if (position) {
+                moveNodeHierarchy(dragId, targetId, position);
             } else {
-                const oldIdx = nodes.findIndex(n => n.id === dragId);
-                const newIdx = nodes.findIndex(n => n.id === targetId);
-                moveNodeHierarchy(dragId, targetId, oldIdx < newIdx ? 'after' : 'before');
+                if (targetNode && isHierarchyContainerNode(targetNode)) {
+                    moveNodeHierarchy(dragId, targetId, 'inside');
+                } else {
+                    const oldIdx = nodes.findIndex(n => n.id === dragId);
+                    const newIdx = nodes.findIndex(n => n.id === targetId);
+                    moveNodeHierarchy(dragId, targetId, oldIdx < newIdx ? 'after' : 'before');
+                }
             }
             pushHistory();
         }
     }
   };
+
+  const dropTargetNode = dropIndicator ? nodes.find((node) => node.id === dropIndicator.targetId) : undefined;
+  const dropSummary = dropIndicator && dropTargetNode
+    ? `${dropIndicator.position === 'inside' ? 'Nest inside' : dropIndicator.position === 'before' ? 'Insert before' : 'Insert after'} ${dropTargetNode.name || dropTargetNode.type}`
+    : null;
 
   return (
     <aside id="layers-panel" className={`bg-[#141414] flex flex-col h-full w-full select-none overflow-hidden ${className || ''}`.trim()}>
@@ -343,6 +423,8 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
           sensors={sensors}
           collisionDetection={closestCenter}
           onDragStart={handleDragStartAll}
+                    onDragOver={handleDragOverAll}
+                    onDragCancel={clearDragState}
           onDragEnd={handleDragEndAll}
         >
       {/* Pages Section */}
@@ -392,6 +474,12 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
         </button>
       </div>
 
+            {dropSummary && (
+                <div className="px-4 py-2 border-b border-indigo-500/20 bg-indigo-500/5 text-[10px] uppercase tracking-widest text-indigo-200 font-bold">
+                    {dropSummary}
+                </div>
+            )}
+
       <div className="flex-1 py-1 text-sm overflow-y-auto custom-scrollbar">
           <SortableContext
             items={flattened.map(f => f.node.id)}
@@ -403,6 +491,7 @@ export const LayersPanel = ({ className, showFooterMeta = false }: LayersPanelPr
                 node={f.node} 
                 depth={f.depth}
                 isSelected={selectedIds.includes(f.node.id)}
+                dropPosition={dropIndicator?.targetId === f.node.id ? dropIndicator.position : null}
                 onSelect={(id) => setSelectedIds([id])}
                 onToggleVisibility={toggleVisibility}
                 onToggleLock={toggleLock}

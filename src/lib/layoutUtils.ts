@@ -9,6 +9,14 @@ interface FlexLine {
   crossSize: number;
 }
 
+const getFlexBasis = (node: SceneNode, axis: Axis): number => {
+  const basis = node.layoutBasis;
+  if (typeof basis === 'number' && Number.isFinite(basis)) {
+    return clampToNodeLimits(node, axis, basis);
+  }
+  return getAxisSize(node, axis);
+};
+
 const clampFinite = (value: number, fallback: number): number => {
   if (!Number.isFinite(value)) return fallback;
   return value;
@@ -42,6 +50,15 @@ const setAxisPosition = (node: SceneNode, axis: Axis, value: number) => {
 
 const getResizingMode = (node: SceneNode, axis: Axis): 'fixed' | 'hug' | 'fill' => {
   return axis === 'horizontal' ? node.horizontalResizing : node.verticalResizing;
+};
+
+const getGrowFactor = (node: SceneNode, axis: Axis): number => {
+  if (node.layoutGrow && node.layoutGrow > 0) return node.layoutGrow;
+  return getResizingMode(node, axis) === 'fill' ? 1 : 0;
+};
+
+const getShrinkFactor = (node: SceneNode): number => {
+  return Number.isFinite(node.layoutShrink) ? Math.max(0, node.layoutShrink || 0) : 1;
 };
 
 const measureTextNode = (node: SceneNode, maxWidth?: number) => {
@@ -133,7 +150,7 @@ const packFlexLines = (
   };
 
   nodes.forEach((node) => {
-    const nodeMain = getAxisSize(node, mainAxis);
+    const nodeMain = getFlexBasis(node, mainAxis);
     const nodeCross = getAxisSize(node, crossAxis);
     const nextMain = current.nodes.length === 0 ? nodeMain : current.mainSize + mainGap + nodeMain;
 
@@ -155,17 +172,50 @@ const packFlexLines = (
   return lines;
 };
 
-const applyFillInLine = (
+const applyFlexibleSizingInLine = (
   line: FlexLine,
   mainAxis: Axis,
   targetMainSize: number,
   mainGap: number
 ) => {
-  const fillNodes = line.nodes.filter((node) => getResizingMode(node, mainAxis) === 'fill');
+  const gapTotal = Math.max(0, line.nodes.length - 1) * mainGap;
+  const currentMain = line.nodes.reduce((sum, node) => sum + getAxisSize(node, mainAxis), 0) + gapTotal;
+  const growNodes = line.nodes.filter((node) => getGrowFactor(node, mainAxis) > 0);
+  const growTotal = growNodes.reduce((sum, node) => sum + getGrowFactor(node, mainAxis), 0);
+  const shrinkNodes = line.nodes.filter((node) => getShrinkFactor(node) > 0);
+  const shrinkWeightTotal = shrinkNodes.reduce((sum, node) => sum + getShrinkFactor(node) * getAxisSize(node, mainAxis), 0);
+
+  if (targetMainSize > currentMain + 0.001 && growNodes.length > 0 && growTotal > 0) {
+    const extra = targetMainSize - currentMain;
+    growNodes.forEach((node) => {
+      const delta = extra * (getGrowFactor(node, mainAxis) / growTotal);
+      setAxisSize(node, mainAxis, getAxisSize(node, mainAxis) + delta);
+    });
+  } else if (targetMainSize < currentMain - 0.001 && shrinkNodes.length > 0 && shrinkWeightTotal > 0) {
+    const deficit = currentMain - targetMainSize;
+    shrinkNodes.forEach((node) => {
+      const weight = getShrinkFactor(node) * getAxisSize(node, mainAxis);
+      const delta = deficit * (weight / shrinkWeightTotal);
+      setAxisSize(node, mainAxis, getAxisSize(node, mainAxis) - delta);
+    });
+  }
+
+  line.mainSize = line.nodes.reduce((sum, node, index) => {
+    return sum + getAxisSize(node, mainAxis) + (index > 0 ? mainGap : 0);
+  }, 0);
+};
+
+const applyLegacyFillInLine = (
+  line: FlexLine,
+  mainAxis: Axis,
+  targetMainSize: number,
+  mainGap: number
+) => {
+  const fillNodes = line.nodes.filter((node) => getResizingMode(node, mainAxis) === 'fill' && getGrowFactor(node, mainAxis) === 1 && (node.layoutGrow || 0) === 0);
   if (fillNodes.length === 0) return;
 
   const fixedMain = line.nodes
-    .filter((node) => getResizingMode(node, mainAxis) !== 'fill')
+    .filter((node) => !fillNodes.includes(node))
     .reduce((sum, node) => sum + getAxisSize(node, mainAxis), 0);
   const gapTotal = Math.max(0, line.nodes.length - 1) * mainGap;
   const available = Math.max(0, targetMainSize - fixedMain - gapTotal);
@@ -288,9 +338,18 @@ export const calculateLayout = (frame: FrameNode, children: SceneNode[]): { fram
     const wrapLimit = allowWrap && frameMainResizing !== 'hug' ? innerMainSize : Number.POSITIVE_INFINITY;
 
     const lines = packFlexLines(layoutChildren, mainAxis, crossAxis, mainGap, wrapLimit, allowWrap);
-    const lineTargetMain = Number.isFinite(wrapLimit) ? wrapLimit : Math.max(0, ...lines.map((line) => line.mainSize), innerMainSize);
+    const lineTargetMain = frameMainResizing === 'hug'
+      ? Math.max(0, ...lines.map((line) => line.mainSize), innerMainSize)
+      : innerMainSize;
     lines.forEach((line) => {
-      applyFillInLine(line, mainAxis, lineTargetMain, mainGap);
+      line.nodes.forEach((node) => {
+        const basis = getFlexBasis(node, mainAxis);
+        if (Math.abs(getAxisSize(node, mainAxis) - basis) > 0.001) {
+          setAxisSize(node, mainAxis, basis);
+        }
+      });
+      applyFlexibleSizingInLine(line, mainAxis, lineTargetMain, mainGap);
+      applyLegacyFillInLine(line, mainAxis, lineTargetMain, mainGap);
       line.crossSize = Math.max(...line.nodes.map((node) => getAxisSize(node, crossAxis)), 0);
     });
 
