@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer, Arrow } from 'react-konva';
 import useImage from 'use-image';
 import { useStore } from '../store';
@@ -25,6 +25,15 @@ import { computeViewportForZoomBox, getSelectableHitStack, normalizeCanvasRect, 
 import type { DirectSelectCycleState } from '../lib/toolSemantics';
 import { AutoLayoutDropPreview, getAutoLayoutDropPreview } from '../lib/autoLayoutDrop';
 import { buildPrototypeNoodlePoints, collectPrototypeConnections, isPrototypeTargetNode, upsertPrototypeNavigation } from '../lib/prototypeNoodles';
+import {
+  createSpatialRuntimeState,
+  findBoundsIdsInRect,
+  findSmallestContainingNodeId,
+  snapNodeToSpatial,
+} from '../lib/spatialRuntime';
+import { createRendererAdapter } from '../engine/render/renderer';
+import { buildVisibleTiles } from '../engine/render/tiling';
+import type { RenderBackendKind } from '../engine/render/types';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
@@ -178,7 +187,12 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps }: KonvaImage
     );
 };
 
-export const Canvas = () => {
+export interface CanvasProps {
+  rendererBackend?: RenderBackendKind;
+  enableSpatialRuntime?: boolean;
+}
+
+export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime = true }: CanvasProps) => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setTool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
@@ -188,10 +202,13 @@ export const Canvas = () => {
   
   const currentPage = pages.find(p => p.id === currentPageId);
   const nodes = currentPage?.nodes || [];
+  const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const spatialRuntime = useMemo(() => createSpatialRuntimeState(nodes), [nodes]);
   
   const stageRef = useRef<Konva.Stage>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
+  const rendererAdapterRef = useRef<ReturnType<typeof createRendererAdapter> | null>(null);
   const directSelectCycleRef = useRef<DirectSelectCycleState | null>(null);
   const viewportAnimationRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState(() => ({
@@ -237,6 +254,43 @@ export const Canvas = () => {
   useEffect(() => {
     window.canvasStage = stageRef.current || undefined;
   }, []);
+
+  useEffect(() => {
+    const adapter = createRendererAdapter({ preferredBackend: rendererBackend });
+    rendererAdapterRef.current = adapter;
+
+    const stage = stageRef.current;
+    const canvas = stage?.container()?.querySelector('canvas') as HTMLCanvasElement | null;
+    if (canvas) {
+      void adapter.initialize(canvas);
+    }
+
+    return () => {
+      adapter.dispose();
+      if (rendererAdapterRef.current === adapter) {
+        rendererAdapterRef.current = null;
+      }
+    };
+  }, [rendererBackend]);
+
+  useEffect(() => {
+    const adapter = rendererAdapterRef.current;
+    if (!adapter) return;
+
+    const viewportBounds = {
+      x: (-viewport.x) / viewport.zoom,
+      y: (-viewport.y) / viewport.zoom,
+      width: dimensions.width / viewport.zoom,
+      height: dimensions.height / viewport.zoom,
+    };
+    const tiles = buildVisibleTiles(viewportBounds, { tileSize: 1024, overscanTiles: 1 });
+
+    void adapter.renderFrame({
+      viewport: viewportBounds,
+      dirtyRegions: tiles.map((tile) => tile.bounds),
+      nodeIds: nodes.map((node) => node.id),
+    });
+  }, [dimensions.height, dimensions.width, nodes, viewport.x, viewport.y, viewport.zoom]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -723,11 +777,7 @@ export const Canvas = () => {
   };
 
   const getGlobalPosition = (nodeId: string): { x: number, y: number } => {
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return { x: 0, y: 0 };
-    if (!node.parentId) return { x: node.x, y: node.y };
-    const parentPos = getGlobalPosition(node.parentId);
-    return { x: parentPos.x + node.x, y: parentPos.y + node.y };
+    return spatialRuntime.positionsById.get(nodeId) || { x: 0, y: 0 };
   };
 
   const getGlobalRect = (nodeId: string) => {
@@ -794,15 +844,15 @@ export const Canvas = () => {
   };
 
   const findPrototypeTargetAtPoint = (point: { x: number; y: number }, excludeId?: string): string | undefined => {
-    const candidates = nodes
-      .filter((node) => isPrototypeTargetNode(node) && node.id !== excludeId)
-      .filter((node) => {
-        const global = getGlobalPosition(node.id);
-        return point.x >= global.x && point.x <= global.x + node.width && point.y >= global.y && point.y <= global.y + node.height;
-      })
-      .sort((left, right) => (left.width * left.height) - (right.width * right.height));
-
-    return candidates[0]?.id;
+    return findSmallestContainingNodeId(
+      spatialRuntime,
+      point,
+      (candidateId) => {
+        const node = nodesById.get(candidateId);
+        return !!node && isPrototypeTargetNode(node);
+      },
+      excludeId
+    );
   };
 
   const evaluateInteractionCondition = (condition: Interaction['condition']) => {
@@ -903,84 +953,23 @@ export const Canvas = () => {
     snapThreshold: number,
     excludedIds: string[] = []
   ): { x: number; y: number; guides: { x?: number; y?: number }[] } => {
-    let snappedX = globalX;
-    let snappedY = globalY;
-    const guides: { x?: number; y?: number }[] = [];
-    const excludedSet = new Set(excludedIds);
-    const dedupeThreshold = Math.max(0.25, snapThreshold * 0.35);
+    if (!enableSpatialRuntime) {
+      return { x: globalX, y: globalY, guides: [] };
+    }
 
-    nodes.forEach((otherNode) => {
-      if (otherNode.id === nodeId || excludedSet.has(otherNode.id)) return;
-      const otherPos = getGlobalPosition(otherNode.id);
-
-      if (Math.abs(snappedX - otherPos.x) < snapThreshold) {
-        snappedX = otherPos.x;
-        guides.push({ x: otherPos.x });
-      }
-      if (Math.abs(snappedX + width / 2 - (otherPos.x + otherNode.width / 2)) < snapThreshold) {
-        snappedX = otherPos.x + otherNode.width / 2 - width / 2;
-        guides.push({ x: otherPos.x + otherNode.width / 2 });
-      }
-      if (Math.abs(snappedX + width - (otherPos.x + otherNode.width)) < snapThreshold) {
-        snappedX = otherPos.x + otherNode.width - width;
-        guides.push({ x: otherPos.x + otherNode.width });
-      }
-
-      if (Math.abs(snappedY - otherPos.y) < snapThreshold) {
-        snappedY = otherPos.y;
-        guides.push({ y: otherPos.y });
-      }
-      if (Math.abs(snappedY + height / 2 - (otherPos.y + otherNode.height / 2)) < snapThreshold) {
-        snappedY = otherPos.y + otherNode.height / 2 - height / 2;
-        guides.push({ y: otherPos.y + otherNode.height / 2 });
-      }
-      if (Math.abs(snappedY + height - (otherPos.y + otherNode.height)) < snapThreshold) {
-        snappedY = otherPos.y + otherNode.height - height;
-        guides.push({ y: otherPos.y + otherNode.height });
-      }
+    const snapped = snapNodeToSpatial({
+      state: spatialRuntime,
+      nodeId,
+      globalX,
+      globalY,
+      width,
+      height,
+      snapThreshold,
+      persistentGuides,
+      excludedIds,
     });
 
-    persistentGuides.forEach((guide) => {
-      if (guide.type === 'vertical') {
-        if (Math.abs(snappedX - guide.position) < snapThreshold) {
-          snappedX = guide.position;
-          guides.push({ x: guide.position });
-        }
-        if (Math.abs(snappedX + width / 2 - guide.position) < snapThreshold) {
-          snappedX = guide.position - width / 2;
-          guides.push({ x: guide.position });
-        }
-        if (Math.abs(snappedX + width - guide.position) < snapThreshold) {
-          snappedX = guide.position - width;
-          guides.push({ x: guide.position });
-        }
-      } else {
-        if (Math.abs(snappedY - guide.position) < snapThreshold) {
-          snappedY = guide.position;
-          guides.push({ y: guide.position });
-        }
-        if (Math.abs(snappedY + height / 2 - guide.position) < snapThreshold) {
-          snappedY = guide.position - height / 2;
-          guides.push({ y: guide.position });
-        }
-        if (Math.abs(snappedY + height - guide.position) < snapThreshold) {
-          snappedY = guide.position - height;
-          guides.push({ y: guide.position });
-        }
-      }
-    });
-
-    const dedupedGuides: { x?: number; y?: number }[] = [];
-    guides.forEach((guide) => {
-      const hasEquivalent = dedupedGuides.some((existing) => {
-        const xClose = typeof guide.x === 'number' && typeof existing.x === 'number' && Math.abs(guide.x - existing.x) <= dedupeThreshold;
-        const yClose = typeof guide.y === 'number' && typeof existing.y === 'number' && Math.abs(guide.y - existing.y) <= dedupeThreshold;
-        return xClose || yClose;
-      });
-      if (!hasEquivalent) dedupedGuides.push(guide);
-    });
-
-    return { x: snappedX, y: snappedY, guides: dedupedGuides };
+    return { x: snapped.x, y: snapped.y, guides: snapped.snapLines };
   };
 
   const finalizePenPath = (closed: boolean = false) => {
@@ -1330,23 +1319,24 @@ export const Canvas = () => {
         }
       }
 
-      const hits = nodes.filter(node => {
-        const globalPos = getGlobalPosition(node.id);
-        const nodeX = globalPos.x;
-        const nodeY = globalPos.y;
-        const nodeRight = nodeX + node.width;
-        const nodeBottom = nodeY + node.height;
-        const boxRight = box.x + box.width;
-        const boxBottom = box.y + box.height;
-        
-        // Classic AABB intersection in global coordinates
-        return (
+      const hits = enableSpatialRuntime
+        ? findBoundsIdsInRect(spatialRuntime, box)
+        : nodes.filter(node => {
+          const globalPos = getGlobalPosition(node.id);
+          const nodeX = globalPos.x;
+          const nodeY = globalPos.y;
+          const nodeRight = nodeX + node.width;
+          const nodeBottom = nodeY + node.height;
+          const boxRight = box.x + box.width;
+          const boxBottom = box.y + box.height;
+
+          return (
             nodeX < boxRight &&
             nodeRight > box.x &&
             nodeY < boxBottom &&
             nodeBottom > box.y
-        );
-      }).map(n => n.id);
+          );
+        }).map(n => n.id);
 
       setSelectedIds(hits);
       clearPathAnchorSelection();
@@ -3091,6 +3081,7 @@ export const Canvas = () => {
     <div
       id="canvas-container"
       className="flex-1 bg-[#1A1A1A] relative overflow-hidden h-full"
+      data-renderer-backend={rendererBackend}
       style={{ cursor: canvasCursor }}
       onClick={() => setContextMenu(null)}
     >

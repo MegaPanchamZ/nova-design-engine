@@ -5,6 +5,7 @@ import { NovaAI } from './NovaAI';
 import { PropertiesPanel } from './PropertiesPanel';
 import { Toolbar } from './Toolbar';
 import { NovaThemeProvider, NovaTheme } from './NovaThemeProvider';
+import type { RenderBackendKind } from '../engine/render/types';
 
 type SlotOverride = ReactNode | ((defaultNode: ReactNode) => ReactNode) | null | false;
 
@@ -14,6 +15,8 @@ export interface NovaEditorComposerProps extends NovaTheme {
   leftPanelWidth?: number;
   rightPanelWidth?: number;
   showAssistant?: boolean;
+  canvasRendererBackend?: RenderBackendKind;
+  enableSpatialRuntime?: boolean;
   layers?: SlotOverride;
   canvas?: SlotOverride;
   toolbar?: SlotOverride;
@@ -33,6 +36,8 @@ export const NovaEditorComposer = ({
   leftPanelWidth = 280,
   rightPanelWidth = 320,
   showAssistant = true,
+  canvasRendererBackend = 'react-konva',
+  enableSpatialRuntime = true,
   mode,
   accentColor,
   panelBackgroundColor,
@@ -46,7 +51,7 @@ export const NovaEditorComposer = ({
   assistant,
 }: NovaEditorComposerProps) => {
   const layersNode = resolveSlot(layers, <LayersPanel />);
-  const canvasNode = resolveSlot(canvas, <Canvas />);
+  const canvasNode = resolveSlot(canvas, <Canvas rendererBackend={canvasRendererBackend} enableSpatialRuntime={enableSpatialRuntime} />);
   const toolbarNode = resolveSlot(toolbar, <Toolbar />);
   const propertiesNode = resolveSlot(properties, <PropertiesPanel modeTabsAccentColor={accentColor} />);
   const assistantNode = showAssistant ? resolveSlot(assistant, <NovaAI />) : null;

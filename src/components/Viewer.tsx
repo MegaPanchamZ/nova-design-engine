@@ -3,16 +3,21 @@ import React, { CSSProperties, useEffect } from 'react';
 import { useStore } from '../store';
 import { NovaTheme, NovaThemeProvider } from './NovaThemeProvider';
 import { Canvas } from './Canvas';
+import type { RenderBackendKind } from '../engine/render/types';
 
 export interface ViewerProps extends NovaTheme {
   className?: string;
   style?: CSSProperties;
+  canvasRendererBackend?: RenderBackendKind;
+  enableSpatialRuntime?: boolean;
 }
 
 export const Viewer = ({
   className,
   style,
   mode,
+  canvasRendererBackend = 'react-konva',
+  enableSpatialRuntime = true,
   accentColor,
   panelBackgroundColor,
   borderColor,
@@ -45,7 +50,7 @@ export const Viewer = ({
         ...style,
       }}
     >
-      <Canvas />
+      <Canvas rendererBackend={canvasRendererBackend} enableSpatialRuntime={enableSpatialRuntime} />
     </NovaThemeProvider>
   );
 };

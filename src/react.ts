@@ -10,6 +10,7 @@ export { Viewer } from './components/Viewer';
 
 export { useStore } from './store';
 export type { DesignState, SceneNode, ToolType, Viewport } from './types';
+export type { CanvasProps } from './components/Canvas';
 export type { LayersPanelProps } from './components/LayersPanel';
 export type { ModeTabsProps, NovaEditorMode } from './components/ModeTabs';
 export type { NovaEditorComposerProps } from './components/NovaEditorComposer';

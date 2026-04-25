@@ -17,6 +17,71 @@ export interface Style {
   properties: Record<string, unknown>;
 }
 
+export interface RichTextMark {
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  fontStyle?: 'normal' | 'italic';
+  textDecoration?: 'none' | 'underline' | 'line-through';
+  letterSpacing?: number;
+  color?: string;
+}
+
+export interface RichTextSpan {
+  id: string;
+  text: string;
+  marks?: RichTextMark;
+}
+
+export interface RichTextParagraph {
+  id: string;
+  spans: RichTextSpan[];
+  align?: 'left' | 'center' | 'right' | 'justify';
+  lineHeight?: number;
+  indent?: number;
+}
+
+export interface RichTextDeltaOp {
+  retain?: number;
+  insert?: string | { type: 'embed'; value: string };
+  delete?: number;
+  attributes?: RichTextMark;
+}
+
+export interface RichTextDocument {
+  version: number;
+  format: 'tree-v1' | 'delta-v1';
+  paragraphs: RichTextParagraph[];
+  delta?: RichTextDeltaOp[];
+}
+
+export interface TextLayoutGlyphRun {
+  start: number;
+  end: number;
+  x: number;
+  width: number;
+}
+
+export interface TextLayoutLine {
+  start: number;
+  end: number;
+  y: number;
+  width: number;
+  baseline: number;
+  ascent: number;
+  descent: number;
+  runs: TextLayoutGlyphRun[];
+}
+
+export interface TextLayoutMetrics {
+  width: number;
+  height: number;
+  baseline: number;
+  ascent: number;
+  descent: number;
+  lines: TextLayoutLine[];
+}
+
 export interface Interaction {
   id: string;
   trigger: 'onClick' | 'onHover' | 'onDrag';
@@ -157,12 +222,14 @@ export interface PathNode extends BaseNode {
 export interface TextNode extends BaseNode {
   type: 'text';
   text: string;
+  richText?: RichTextDocument;
   fontSize: number;
   fontFamily: string;
   fontStyle: string;
   lineHeight?: number;
   align: 'left' | 'center' | 'right';
   writingMode?: 'horizontal-tb' | 'vertical-rl' | 'vertical-lr';
+  textLayoutMetrics?: TextLayoutMetrics;
 }
 
 export interface BooleanNode extends BaseNode {

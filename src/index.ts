@@ -67,6 +67,46 @@ export { resolveGeneratedImageTokens } from './engine/imageTokens';
 /** Executes a Nova turn and merges generated results back into a scene. */
 export { mergeGeneratedNodes, runNovaTurn } from './engine/engine';
 
+/** Renderer abstraction and phased migration helpers for CanvasKit/WebGL backends. */
+export { createRendererAdapter } from './engine/render/renderer';
+
+/** Viewport tiling helpers for incremental rendering at large scene scale. */
+export { buildVisibleTiles } from './engine/render/tiling';
+
+/** Mask stack traversal used by rendering backends and export pipelines. */
+export { buildMaskRuns } from './engine/render/maskStack';
+
+/** Spatial indexing primitives used for selection, snapping, and hit-testing. */
+export { SpatialIndex } from './engine/spatial/spatialIndex';
+
+/** Transactional command bus with event log and undo-group tracking. */
+export { TransactionalCommandBus } from './engine/state/commandBus';
+
+/** Deterministic snapping utility for edge/center guides. */
+export { computeSnap } from './engine/snapping/snapEngine';
+
+/** Boolean engine wrapper with WASM adapter hooks and deterministic fallback. */
+export { DeterministicBooleanEngine, createFallbackBooleanAdapter } from './engine/geometry/booleanWasm';
+
+/** Rich text model helpers and delta application utilities. */
+export { createRichTextDocument, applyDelta, toPlainText } from './engine/text/richText';
+
+/** Text layout engine for baseline/line metrics. */
+export { computeTextLayout } from './engine/text/textLayout';
+
+/** Text editing primitives for cursor movement and insertion. */
+export { insertText, moveCursor } from './engine/text/textEditorModel';
+
+/** Modular layout subsystem covering constraints, grid, and modifiers. */
+export * from './engine/layout';
+
+/** Variant propagation helper that preserves per-instance touched fields. */
+export { syncVariantWithTouchedFields } from './engine/components/variantSync';
+
+/** Headless export adapters and vector PDF generation primitives. */
+export { createHeadlessExporter } from './engine/export/workerExporter';
+export { generateVectorPdf } from './engine/export/pdfVector';
+
 /** Store binding helpers for host apps that want to apply Nova turns. */
 export { applyNovaTurnToState, createNovaEditorBindings } from './bindings';
 
@@ -84,6 +124,40 @@ export type {
   NovaTurnInput,
   NovaTurnResult,
 } from './engine/types';
+
+/** Renderer backend adapter contracts. */
+export type {
+  RenderBackendKind,
+  RenderBounds,
+  RendererAdapter,
+  RendererFrameInput,
+  RenderMaskLayer,
+  RenderStats,
+  RenderTile,
+} from './engine/render/types';
+
+/** Spatial query and index model types. */
+export type { SpatialBounds, SpatialPoint, SpatialQuery } from './engine/spatial/types';
+
+/** Transactional command and event envelope contracts. */
+export type { Command, EventEnvelope, TransactionalReducer, UndoGroup } from './engine/state/commandBus';
+
+/** Snap engine input/output contracts. */
+export type { SnapGuide, SnapQuery, SnapResult } from './engine/snapping/snapEngine';
+
+/** Boolean operation adapter contracts. */
+export type { BooleanOperation, BooleanWasmAdapter } from './engine/geometry/booleanWasm';
+
+/** Text engine and editor state contracts. */
+export type { TextEditorState, TextSelection } from './engine/text/textEditorModel';
+export type { TextLayoutOptions } from './engine/text/textLayout';
+
+/** Variant synchronization input contract. */
+export type { VariantSyncInput } from './engine/components/variantSync';
+
+/** Export pipeline contracts for headless and vector output. */
+export type { ExportPayload, ExportResult, HeadlessExporter } from './engine/export/workerExporter';
+export type { PdfVectorDocumentInput, PdfVectorPath } from './engine/export/pdfVector';
 
 /** Binding input and output types for applying Nova turns to editor state. */
 export type {

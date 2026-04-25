@@ -1,0 +1,99 @@
+---
+title: Scale Roadmap
+description: High-scale architecture roadmap with phased module rollouts for rendering, state, text, layout, and export.
+---
+
+# Scale Roadmap
+
+This roadmap captures the large-scale architecture path to make Nova Design Engine production-ready for very large documents and advanced editor workflows.
+
+## Phase 1: Rendering and Interaction Core
+
+Status: Foundation shipped in this package.
+
+Implemented modules:
+
+- `src/engine/render/types.ts`: backend-neutral renderer contracts.
+- `src/engine/render/renderer.ts`: backend adapter selection entrypoint.
+- `src/engine/render/tiling.ts`: viewport tile generation for incremental draw.
+- `src/engine/render/maskStack.ts`: mask-stack traversal groups.
+- `src/engine/spatial/*`: off-main-thread-compatible spatial index protocol/client/worker.
+
+Acceptance baseline:
+
+- Rendering backend can be swapped behind one adapter contract.
+- Viewport tiling and masking APIs are available for CanvasKit/WebGL migration.
+- Spatial queries are ready to run in Worker mode.
+
+## Phase 2: Transactional State and Editing Guarantees
+
+Status: Foundation shipped in this package.
+
+Implemented modules:
+
+- `src/engine/state/commandBus.ts`: transactional command/event pipeline with undo groups.
+- `src/engine/snapping/snapEngine.ts`: deterministic alignment snapping.
+- `src/engine/geometry/booleanWasm.ts`: WASM boolean adapter contract + deterministic fallback.
+
+Acceptance baseline:
+
+- Commands can be committed as grouped transactions.
+- Event stream can be captured for replay or diagnostics.
+- Geometry engine can upgrade to a strict WASM backend without API churn.
+
+## Phase 3: Rich Text and Content Architecture
+
+Status: Foundation shipped in this package.
+
+Implemented modules:
+
+- `src/types.ts`: hierarchical rich text and text layout metrics.
+- `src/engine/text/richText.ts`: tree/delta document primitives.
+- `src/engine/text/textLayout.ts`: baseline-aware line layout.
+- `src/engine/text/textEditorModel.ts`: cursor and insertion model.
+
+Acceptance baseline:
+
+- Text nodes can carry structured document content.
+- Delta-based edits can be represented and applied.
+- Layout metrics are explicit and consumable by renderer/UI.
+
+## Phase 4: Advanced Auto Layout and Components
+
+Status: Foundation shipped in this package.
+
+Implemented modules:
+
+- `src/engine/layout/bounds.ts`: canonical layout bounds.
+- `src/engine/layout/constraints.ts`: frame-relative constraints.
+- `src/engine/layout/grid.ts`: grid placement resolution.
+- `src/engine/layout/modifiers.ts`: composable layout modifiers.
+- `src/engine/components/variantSync.ts`: touched-field-safe variant sync.
+
+Acceptance baseline:
+
+- Layout logic is decomposed into reusable subsystems.
+- Grid/constraints can be composed by host editors.
+- Variant propagation preserves local overrides.
+
+## Phase 5: Export and Production Hardening
+
+Status: Foundation shipped in this package.
+
+Implemented modules:
+
+- `src/engine/export/workerExporter.ts`: headless export interface.
+- `src/engine/export/pdfVector.ts`: vector-first PDF document generation primitives.
+
+Acceptance baseline:
+
+- Export pipeline has a worker-friendly API boundary.
+- Vector PDF generation can be integrated without rewriting scene traversal.
+
+## Next Milestones
+
+- Wire the new renderer interface into the React runtime as an experimental backend flag.
+- Upgrade spatial worker to a packed R-tree implementation.
+- Replace fallback boolean adapter with a deterministic WASM implementation.
+- Extend rich text to support paragraph trees and embedded objects.
+- Add full SVG path command support in vector PDF output.

@@ -1,12 +1,15 @@
 import React from 'react';
 import { NovaEditorComposer } from './NovaEditorComposer';
 import type { NovaTheme } from './NovaThemeProvider';
+import type { RenderBackendKind } from '../engine/render/types';
 
 export interface NovaEditorShellProps extends NovaTheme {
   className?: string;
   showChat?: boolean;
   leftPanelWidth?: number;
   rightPanelWidth?: number;
+  canvasRendererBackend?: RenderBackendKind;
+  enableSpatialRuntime?: boolean;
 }
 
 export const NovaEditorShell = ({
@@ -14,6 +17,8 @@ export const NovaEditorShell = ({
   showChat = true,
   leftPanelWidth = 280,
   rightPanelWidth = 320,
+  canvasRendererBackend = 'react-konva',
+  enableSpatialRuntime = true,
   mode,
   accentColor,
   panelBackgroundColor,
@@ -27,6 +32,8 @@ export const NovaEditorShell = ({
       showAssistant={showChat}
       leftPanelWidth={leftPanelWidth}
       rightPanelWidth={rightPanelWidth}
+      canvasRendererBackend={canvasRendererBackend}
+      enableSpatialRuntime={enableSpatialRuntime}
       mode={mode}
       accentColor={accentColor}
       panelBackgroundColor={panelBackgroundColor}
