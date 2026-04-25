@@ -1,4 +1,5 @@
 import { FrameNode, SceneNode } from '../types';
+import { SpatialBounds } from '../engine/spatial/types';
 
 type DropPosition = 'before' | 'after' | 'inside';
 type MarkerOrientation = 'vertical' | 'horizontal';
@@ -41,6 +42,32 @@ export interface AutoLayoutDropPreview {
 }
 
 const BAND_TOLERANCE = 1.5;
+
+const isFrameLikeNode = (node: SceneNode): node is FrameNode => {
+  return node.type === 'frame' || node.type === 'section' || node.type === 'group' || node.type === 'component' || node.type === 'instance';
+};
+
+export const findDeepestAutoLayoutContainerFromHits = (
+  hits: SpatialBounds[],
+  nodesById: Map<string, SceneNode>,
+  excludeIds: string[] = []
+): string | undefined => {
+  const excluded = new Set(excludeIds);
+
+  const candidates = hits
+    .filter((entry) => !excluded.has(entry.id))
+    .map((entry) => ({ entry, node: nodesById.get(entry.id) }))
+    .filter((item): item is { entry: SpatialBounds; node: SceneNode } => Boolean(item.node))
+    .filter(({ node }) => isFrameLikeNode(node) && node.layoutMode !== 'none' && node.visible !== false)
+    .sort((left, right) => {
+      const leftArea = Math.max(0, left.entry.maxX - left.entry.minX) * Math.max(0, left.entry.maxY - left.entry.minY);
+      const rightArea = Math.max(0, right.entry.maxX - right.entry.minX) * Math.max(0, right.entry.maxY - right.entry.minY);
+      if (leftArea === rightArea) return 0;
+      return leftArea - rightArea;
+    });
+
+  return candidates[0]?.entry.id;
+};
 
 const getLineDistance = (marker: LineMarker, pointer: Point): number => {
   if (marker.orientation === 'vertical') {

@@ -11,6 +11,7 @@ import { measureText } from './lib/measureText';
 import { v4 as uuidv4 } from 'uuid';
 import { generateUI, generateImage } from './services/novaAIService';
 import { parseHTMLToNodes } from './lib/htmlParser';
+import { syncVariantWithTouchedFields } from './engine/components/variantSync';
 import { Command, TransactionalCommandBus, TransactionalReducer } from './engine/state/commandBus';
 
 interface ClipboardSnapshot {
@@ -410,11 +411,20 @@ const reapplyInstanceOverrides = (instanceNode: SceneNode, masterNode: SceneNode
         masterNode
     );
 
+    const touchedFields = sanitizedOverrides ? Object.keys(sanitizedOverrides) : [];
+    const syncedNode = masterNode
+        ? syncVariantWithTouchedFields({
+            instanceNode,
+            masterNode,
+            touchedFields,
+        })
+        : instanceNode;
+
     if (!sanitizedOverrides) {
-        return instanceNode.instanceOverrides ? { ...instanceNode, instanceOverrides: undefined } : instanceNode;
+        return syncedNode.instanceOverrides ? { ...syncedNode, instanceOverrides: undefined } : syncedNode;
     }
 
-    const mergedNode = applyNodePatch({ ...instanceNode, instanceOverrides: undefined } as SceneNode, sanitizedOverrides as Partial<SceneNode>);
+    const mergedNode = applyNodePatch({ ...syncedNode, instanceOverrides: undefined } as SceneNode, sanitizedOverrides as Partial<SceneNode>);
     return { ...mergedNode, instanceOverrides: sanitizedOverrides };
 };
 

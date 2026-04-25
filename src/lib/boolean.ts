@@ -1,27 +1,6 @@
-import paper from 'paper/dist/paper-core';
-
 import { SceneNode } from '../types';
+import { combineBooleanPaths, BooleanOperation } from '../engine/geometry/booleanWasm';
 
-type BooleanOperation = 'union' | 'subtract' | 'intersect' | 'exclude';
-interface BooleanPathItem {
-  pathData: string;
-  remove(): void;
-  unite(other: BooleanPathItem, options?: { insert?: boolean }): BooleanPathItem;
-  subtract(other: BooleanPathItem, options?: { insert?: boolean }): BooleanPathItem;
-  intersect(other: BooleanPathItem, options?: { insert?: boolean }): BooleanPathItem;
-  exclude(other: BooleanPathItem, options?: { insert?: boolean }): BooleanPathItem;
-}
-
-let paperScopeReady = false;
-
-const getPaperScope = () => {
-  if (!paperScopeReady) {
-    paper.setup(new paper.Size(2048, 2048));
-    paperScopeReady = true;
-  }
-
-  return paper;
-};
 
 const toRectPath = (node: SceneNode): string => {
   const x = node.x;
@@ -54,63 +33,15 @@ const nodeToPath = (node: SceneNode): string => {
   return '';
 };
 
-const createBooleanPathItem = (scope: typeof paper, pathData: string): BooleanPathItem | null => {
-  if (!pathData.trim()) return null;
-
-  try {
-    return new scope.CompoundPath({ insert: false, pathData });
-  } catch {
-    try {
-      const fallbackPath = new scope.Path({ insert: false });
-      fallbackPath.pathData = pathData;
-      return fallbackPath;
-    } catch {
-      return null;
-    }
-  }
-};
-
-const applyBooleanOperation = (
-  left: BooleanPathItem,
-  right: BooleanPathItem,
-  operation: BooleanOperation
-): BooleanPathItem => {
-  switch (operation) {
-    case 'union':
-      return left.unite(right, { insert: false });
-    case 'subtract':
-      return left.subtract(right, { insert: false });
-    case 'intersect':
-      return left.intersect(right, { insert: false });
-    case 'exclude':
-      return left.exclude(right, { insert: false });
-  }
-};
-
 export const performBooleanOperation = (
   nodes: SceneNode[],
   operation: BooleanOperation
 ): string => {
-  const scope = getPaperScope();
-  const pathItems = nodes
+  const paths = nodes
     .map(nodeToPath)
-    .filter(Boolean)
-    .map((pathData) => createBooleanPathItem(scope, pathData))
-    .filter((item): item is BooleanPathItem => Boolean(item));
+    .filter((path): path is string => Boolean(path));
 
-  if (pathItems.length < 2) return '';
+  if (paths.length < 2) return '';
 
-  let result = pathItems[0];
-
-  for (let index = 1; index < pathItems.length; index += 1) {
-    const nextPath = pathItems[index];
-    const nextResult = applyBooleanOperation(result, nextPath, operation);
-    result.remove();
-    nextPath.remove();
-    result = nextResult;
-  }
-
-  const pathData = result.pathData || '';
-  result.remove();
-  return pathData;
+  return combineBooleanPaths(paths, operation);
 };

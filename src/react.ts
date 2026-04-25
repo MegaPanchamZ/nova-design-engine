@@ -1,20 +1,24 @@
 export { Canvas } from './components/Canvas';
+export { GuidesOverlay } from './components/overlays/GuidesOverlay';
 export { LayersPanel } from './components/LayersPanel';
 export { ModeTabs } from './components/ModeTabs';
 export { NovaAI } from './components/NovaAI';
 export { NovaEditorComposer } from './components/NovaEditorComposer';
 export { PropertiesPanel } from './components/PropertiesPanel';
 export { Toolbar } from './components/Toolbar';
+export { TransformOverlay } from './components/overlays/TransformOverlay';
 export { NovaEditorShell } from './components/NovaEditorShell';
 export { Viewer } from './components/Viewer';
 
 export { useStore } from './store';
 export type { DesignState, SceneNode, ToolType, Viewport } from './types';
 export type { CanvasProps } from './components/Canvas';
+export type { GuidesOverlayProps } from './components/overlays/GuidesOverlay';
 export type { LayersPanelProps } from './components/LayersPanel';
 export type { ModeTabsProps, NovaEditorMode } from './components/ModeTabs';
 export type { NovaEditorComposerProps } from './components/NovaEditorComposer';
 export type { PropertiesPanelProps } from './components/PropertiesPanel';
+export type { TransformOverlayProps } from './components/overlays/TransformOverlay';
 export type { NovaEditorShellProps } from './components/NovaEditorShell';
 export type { ViewerProps } from './components/Viewer';
 

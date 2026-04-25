@@ -1,10 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { Stage, Layer, Rect, Circle, Ellipse, Text, Path, Line, Group, Transformer, Arrow } from 'react-konva';
-import useImage from 'use-image';
 import { useStore } from '../store';
-import { createDefaultNode, Effect, FrameNode, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
-import Konva from 'konva';
-import { getSuperellipsePath } from '../lib/geometry';
+import { createDefaultNode, FrameNode, ImageNode, Interaction, PathNode, SceneNode, TextNode, ToolType } from '../types';
 import {
   buildPathDataFromPenPoints,
   insertAnchorAtPoint,
@@ -16,31 +12,52 @@ import {
   toggleAnchorCurve,
 } from '../lib/pathTooling';
 import type { PathAnchor } from '../lib/pathTooling';
-import { buildMaskingRuns } from '../lib/masking';
 import { scaleSceneNode } from '../lib/nodeTransforms';
 import { isDrawingTool as isRegisteredDrawingTool, isSelectionTool, matchToolShortcut } from '../lib/toolRegistry';
 import type { DrawingToolType } from '../lib/toolRegistry';
 import { computeViewportForZoomBox, getSelectableHitStack, normalizeCanvasRect, resolveDirectSelectCycle } from '../lib/toolSemantics';
 import type { DirectSelectCycleState } from '../lib/toolSemantics';
-import { AutoLayoutDropPreview, getAutoLayoutDropPreview } from '../lib/autoLayoutDrop';
-import { buildPrototypeNoodlePoints, collectPrototypeConnections, isPrototypeTargetNode, upsertPrototypeNavigation } from '../lib/prototypeNoodles';
+import { AutoLayoutDropPreview, findDeepestAutoLayoutContainerFromHits, getAutoLayoutDropPreview } from '../lib/autoLayoutDrop';
+import { isPrototypeTargetNode, upsertPrototypeNavigation } from '../lib/prototypeNoodles';
 import {
   createSpatialRuntimeState,
   findBoundsIdsInRect,
   findSmallestContainingNodeId,
+  snapNodeToSpatialCandidates,
   snapNodeToSpatial,
 } from '../lib/spatialRuntime';
 import { SpatialWorkerRuntime } from '../lib/spatialWorkerRuntime';
 import { createRendererAdapter } from '../engine/render/renderer';
 import { buildVisibleTiles } from '../engine/render/tiling';
-import type { RenderBackendKind } from '../engine/render/types';
+import type { RenderBackendKind, RendererFrameInput } from '../engine/render/types';
 import { createRichTextDocument, toPlainText } from '../engine/text/richText';
 import { computeTextLayout } from '../engine/text/textLayout';
 import { FigmaRulers } from './Rulers';
+import { GuidesOverlay } from './overlays/GuidesOverlay';
+import { TransformOverlay } from './overlays/TransformOverlay';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
-type CanvasMouseEvent = Konva.KonvaEventObject<MouseEvent>;
-type CanvasWheelEvent = Konva.KonvaEventObject<WheelEvent>;
+
+type CanvasSceneEvent = {
+  target: any;
+  evt: any;
+  type: string;
+  cancelBubble?: boolean;
+};
+
+type StageHandle = {
+  getPointerPosition: () => { x: number; y: number } | null;
+  container: () => HTMLDivElement;
+  findOne: (selector: string) => any;
+  scaleX: () => number;
+  x: () => number;
+  y: () => number;
+};
+
+type TransformerHandle = {
+  nodes: (nodes: any[]) => void;
+  getLayer: () => { batchDraw: () => void } | null;
+};
 
 interface ContextMenuState {
   x: number;
@@ -60,13 +77,6 @@ interface PrototypeConnectionDraft {
   targetId: string | null;
 }
 
-interface KonvaImageProps {
-  node: ImageNode;
-  konvaProps: React.ComponentProps<typeof Rect>;
-  selectionProps: React.ComponentProps<typeof Rect> | null;
-  hoverProps: React.ComponentProps<typeof Rect> | null;
-}
-
 const isFrameLikeNode = (node: SceneNode): node is FrameNode =>
   node.type === 'frame' ||
   node.type === 'section' ||
@@ -74,120 +84,7 @@ const isFrameLikeNode = (node: SceneNode): node is FrameNode =>
   node.type === 'component' ||
   node.type === 'instance';
 
-interface SanitizedCorners {
-  topLeft: number;
-  topRight: number;
-  bottomRight: number;
-  bottomLeft: number;
-}
-
-const clampCornerValue = (value: number, fallback: number, maxCornerRadius: number): number => {
-  const safeFallback = Number.isFinite(fallback) ? fallback : 0;
-  if (!Number.isFinite(value)) return Math.min(maxCornerRadius, Math.max(0, safeFallback));
-  return Math.min(maxCornerRadius, Math.max(0, value));
-};
-
-const getSanitizedCornerData = (node: Pick<SceneNode, 'width' | 'height' | 'cornerRadius' | 'individualCornerRadius' | 'cornerSmoothing'>) => {
-  const safeWidth = Number.isFinite(node.width) ? Math.abs(node.width) : 0;
-  const safeHeight = Number.isFinite(node.height) ? Math.abs(node.height) : 0;
-  const maxCornerRadius = Math.max(0, Math.min(safeWidth, safeHeight) / 2);
-  const uniform = clampCornerValue(node.cornerRadius || 0, 0, maxCornerRadius);
-  const corners: SanitizedCorners = {
-    topLeft: clampCornerValue(node.individualCornerRadius?.topLeft ?? uniform, uniform, maxCornerRadius),
-    topRight: clampCornerValue(node.individualCornerRadius?.topRight ?? uniform, uniform, maxCornerRadius),
-    bottomRight: clampCornerValue(node.individualCornerRadius?.bottomRight ?? uniform, uniform, maxCornerRadius),
-    bottomLeft: clampCornerValue(node.individualCornerRadius?.bottomLeft ?? uniform, uniform, maxCornerRadius),
-  };
-
-  const smoothingRaw = Number.isFinite(node.cornerSmoothing) ? node.cornerSmoothing : 0;
-  const smoothing = Math.min(1, Math.max(0, smoothingRaw));
-
-  return {
-    uniform,
-    corners,
-    cornerRadiusArray: [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft] as [number, number, number, number],
-    smoothing,
-  };
-};
-
-const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps }: KonvaImageProps) => {
-    const [img] = useImage(node.src, 'anonymous');
-    const cornerData = getSanitizedCornerData(node);
-    
-    const getScaleProps = () => {
-        if (!img) return {};
-        
-        const mode = node.imageScaleMode || 'fill';
-        const nodeWidth = node.width;
-        const nodeHeight = node.height;
-        const imgWidth = img.width;
-        const imgHeight = img.height;
-        
-        let scale = 1;
-        let offsetX = 0;
-        let offsetY = 0;
-        let repeat = 'no-repeat';
-
-        if (mode === 'fill') {
-            scale = Math.max(nodeWidth / imgWidth, nodeHeight / imgHeight);
-            offsetX = (imgWidth * scale - nodeWidth) / 2 / scale;
-            offsetY = (imgHeight * scale - nodeHeight) / 2 / scale;
-        } else if (mode === 'fit') {
-            scale = Math.min(nodeWidth / imgWidth, nodeHeight / imgHeight);
-            offsetX = (imgWidth * scale - nodeWidth) / 2 / scale;
-            offsetY = (imgHeight * scale - nodeHeight) / 2 / scale;
-        } else if (mode === 'tile') {
-            scale = node.imageScale || 1;
-            repeat = 'repeat';
-        } else {
-            // Stretch (default / old behavior)
-            return {
-                fillPatternImage: img,
-                fillPatternScaleX: nodeWidth / imgWidth,
-                fillPatternScaleY: nodeHeight / imgHeight,
-                fillPatternRepeat: 'no-repeat'
-            };
-        }
-
-        return {
-            fillPatternImage: img,
-            fillPatternScaleX: scale,
-            fillPatternScaleY: scale,
-            fillPatternOffset: { x: offsetX, y: offsetY },
-            fillPatternRepeat: repeat
-        };
-    };
-
-    const imageProps = getScaleProps();
-
-    return (
-        <Group>
-            <Rect 
-                {...konvaProps}
-                {...imageProps}
-                fill={!img ? '#E5E7EB' : undefined}
-                lineJoin="round"
-              cornerRadius={cornerData.cornerRadiusArray}
-            />
-             {selectionProps && (
-                <Rect 
-                    x={node.x} y={node.y} width={node.width} height={node.height}
-                    rotation={node.rotation}
-                cornerRadius={cornerData.cornerRadiusArray}
-                    {...selectionProps}
-                />
-            )}
-            {hoverProps && (
-                <Rect 
-                    x={node.x} y={node.y} width={node.width} height={node.height}
-                    rotation={node.rotation}
-                cornerRadius={cornerData.cornerRadiusArray}
-                    {...hoverProps}
-                />
-            )}
-        </Group>
-    );
-};
+const LazyKonvaSceneTree = React.lazy(() => import('./renderers/KonvaSceneTree'));
 
 export interface CanvasProps {
   rendererBackend?: RenderBackendKind;
@@ -212,12 +109,19 @@ export const Canvas = ({
   const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const spatialRuntime = useMemo(() => createSpatialRuntimeState(nodes), [nodes]);
   
-  const stageRef = useRef<Konva.Stage>(null);
+  const stageRef = useRef<StageHandle | null>(null);
+  const pureCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const transformerRef = useRef<Konva.Transformer>(null);
+  const transformerRef = useRef<TransformerHandle | null>(null);
   const rendererAdapterRef = useRef<ReturnType<typeof createRendererAdapter> | null>(null);
+  const rendererFrameInputRef = useRef<RendererFrameInput | null>(null);
   const spatialWorkerRuntimeRef = useRef<SpatialWorkerRuntime | null>(null);
   const prototypeHitRequestRef = useRef(0);
+  const hoverHitRequestRef = useRef(0);
+  const dragSpatialRequestRef = useRef(0);
+  const directSelectHitRequestRef = useRef(0);
+  const hoveredNodeRef = useRef<string | null>(null);
+  const purePointerRef = useRef({ x: 0, y: 0, localX: 0, localY: 0, clientX: 0, clientY: 0 });
   const directSelectCycleRef = useRef<DirectSelectCycleState | null>(null);
   const viewportAnimationRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState(() => ({
@@ -250,6 +154,50 @@ export const Canvas = ({
 
   const resolvedSpatialRuntimeMode = enableSpatialRuntime ? spatialRuntimeMode : 'main-thread';
   const useWorkerSpatialRuntime = enableSpatialRuntime && resolvedSpatialRuntimeMode === 'worker';
+  const isPureRendererMode = rendererBackend === 'canvas' || rendererBackend === 'skia' || rendererBackend === 'canvaskit';
+
+  const renderSceneNodes = useMemo(() => {
+    return nodes.map((node) => {
+      const global = spatialRuntime.positionsById.get(node.id) || { x: node.x, y: node.y };
+      return {
+        id: node.id,
+        node,
+        globalX: global.x,
+        globalY: global.y,
+      };
+    });
+  }, [nodes, spatialRuntime.positionsById]);
+
+  const rendererFrameInput = useMemo<RendererFrameInput>(() => {
+    const viewportBounds = {
+      x: (-viewport.x) / viewport.zoom,
+      y: (-viewport.y) / viewport.zoom,
+      width: dimensions.width / viewport.zoom,
+      height: dimensions.height / viewport.zoom,
+    };
+    const tiles = buildVisibleTiles(viewportBounds, { tileSize: 1024, overscanTiles: 1 });
+
+    return {
+      viewport: viewportBounds,
+      dirtyRegions: tiles.map((tile) => tile.bounds),
+      nodeIds: nodes.map((node) => node.id),
+      sceneNodes: renderSceneNodes,
+      camera: {
+        x: viewport.x,
+        y: viewport.y,
+        zoom: viewport.zoom,
+        pixelRatio: typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
+      },
+      canvasSize: {
+        width: dimensions.width,
+        height: dimensions.height,
+      },
+    };
+  }, [dimensions.height, dimensions.width, nodes, renderSceneNodes, viewport.x, viewport.y, viewport.zoom]);
+
+  useEffect(() => {
+    hoveredNodeRef.current = hoveredId;
+  }, [hoveredId]);
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
@@ -264,45 +212,79 @@ export const Canvas = ({
           : 'default';
 
   useEffect(() => {
-    window.canvasStage = stageRef.current || undefined;
-  }, []);
+    window.canvasStage = (stageRef.current as any) || undefined;
+  }, [isPureRendererMode]);
 
   useEffect(() => {
     const adapter = createRendererAdapter({ preferredBackend: rendererBackend });
     rendererAdapterRef.current = adapter;
 
-    const stage = stageRef.current;
-    const canvas = stage?.container()?.querySelector('canvas') as HTMLCanvasElement | null;
-    if (canvas) {
+    let cancelled = false;
+    let initializeFrame: number | null = null;
+
+    const tryInitialize = () => {
+      if (cancelled) return;
+
+      const stage = stageRef.current;
+      const stageCanvas = stage?.container()?.querySelector('canvas') as HTMLCanvasElement | null;
+      const canvas = isPureRendererMode ? pureCanvasRef.current : stageCanvas;
+
+      if (!canvas) {
+        initializeFrame = requestAnimationFrame(tryInitialize);
+        return;
+      }
+
       void adapter.initialize(canvas);
-    }
+    };
+
+    tryInitialize();
 
     return () => {
+      cancelled = true;
+      if (initializeFrame !== null) cancelAnimationFrame(initializeFrame);
       adapter.dispose();
       if (rendererAdapterRef.current === adapter) {
         rendererAdapterRef.current = null;
       }
     };
-  }, [rendererBackend]);
+  }, [isPureRendererMode, rendererBackend]);
 
   useEffect(() => {
+    rendererFrameInputRef.current = rendererFrameInput;
+  }, [rendererFrameInput]);
+
+  useEffect(() => {
+    if (!isPureRendererMode) return;
+
+    let rafId: number | null = null;
+    let active = true;
+
+    const renderLoop = () => {
+      if (!active) return;
+      const adapter = rendererAdapterRef.current;
+      const input = rendererFrameInputRef.current;
+      if (adapter && input) {
+        void adapter.renderFrame(input);
+      }
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    rafId = requestAnimationFrame(renderLoop);
+
+    return () => {
+      active = false;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [isPureRendererMode]);
+
+  useEffect(() => {
+    if (isPureRendererMode) return;
+
     const adapter = rendererAdapterRef.current;
     if (!adapter) return;
 
-    const viewportBounds = {
-      x: (-viewport.x) / viewport.zoom,
-      y: (-viewport.y) / viewport.zoom,
-      width: dimensions.width / viewport.zoom,
-      height: dimensions.height / viewport.zoom,
-    };
-    const tiles = buildVisibleTiles(viewportBounds, { tileSize: 1024, overscanTiles: 1 });
-
-    void adapter.renderFrame({
-      viewport: viewportBounds,
-      dirtyRegions: tiles.map((tile) => tile.bounds),
-      nodeIds: nodes.map((node) => node.id),
-    });
-  }, [dimensions.height, dimensions.width, nodes, viewport.x, viewport.y, viewport.zoom]);
+    void adapter.renderFrame(rendererFrameInput);
+  }, [isPureRendererMode, rendererFrameInput]);
 
   useEffect(() => {
     if (!useWorkerSpatialRuntime) {
@@ -697,7 +679,7 @@ export const Canvas = ({
     });
   };
 
-  const handleControlPointDragMove = (nodeId: string, index: number, kind: 'in' | 'out', event: CanvasMouseEvent) => {
+  const handleControlPointDragMove = (nodeId: string, index: number, kind: 'in' | 'out', event: CanvasSceneEvent) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node || node.type !== 'path') return;
 
@@ -791,22 +773,43 @@ export const Canvas = ({
   // Handle selection Transformer
   useEffect(() => {
     if (transformerRef.current && stageRef.current) {
+      if (isPureRendererMode) {
+        transformerRef.current.nodes([]);
+        return;
+      }
       if (editingId || penPoints.length > 0) {
         transformerRef.current.nodes([]);
         return;
       }
       const selectedNodes = filterTopLevelSelection(selectedIds)
         .map(id => stageRef.current?.findOne('#' + id))
-        .filter(node => node !== undefined) as Konva.Node[];
+        .filter((node) => node !== undefined) as any[];
       
       transformerRef.current.nodes(selectedNodes);
       transformerRef.current.getLayer()?.batchDraw();
     }
-  }, [selectedIds, nodes, editingId]);
+  }, [editingId, isPureRendererMode, nodes, selectedIds]);
+
+  const updatePurePointer = (clientX: number, clientY: number) => {
+    const containerRect = containerRef.current?.getBoundingClientRect();
+    if (!containerRect) {
+      purePointerRef.current = { ...purePointerRef.current, clientX, clientY };
+      return purePointerRef.current;
+    }
+
+    const localX = clientX - containerRect.left;
+    const localY = clientY - containerRect.top;
+    const x = (localX - viewport.x) / viewport.zoom;
+    const y = (localY - viewport.y) / viewport.zoom;
+    purePointerRef.current = { x, y, localX, localY, clientX, clientY };
+    return purePointerRef.current;
+  };
 
   const getPointerPosition = () => {
     const stage = stageRef.current;
-    if (!stage) return { x: 0, y: 0 };
+    if (!stage || isPureRendererMode) {
+      return { x: purePointerRef.current.x, y: purePointerRef.current.y };
+    }
     const pointer = stage.getPointerPosition();
     if (!pointer) return { x: 0, y: 0 };
     
@@ -927,6 +930,149 @@ export const Canvas = ({
     });
 
     return hits.map((entry) => entry.id);
+  };
+
+  const setHoveredNode = (nodeId: string | null) => {
+    if (hoveredNodeRef.current === nodeId) return;
+
+    hoveredNodeRef.current = nodeId;
+    useStore.getState().setHoveredId(nodeId);
+
+    if (!nodeId || mode !== 'prototype') return;
+    const node = nodesById.get(nodeId);
+    if (node) runNodeInteractions(node, 'onHover');
+  };
+
+  const sortBoundsByArea = (left: { minX: number; minY: number; maxX: number; maxY: number }, right: { minX: number; minY: number; maxX: number; maxY: number }) => {
+    const leftArea = Math.max(0, left.maxX - left.minX) * Math.max(0, left.maxY - left.minY);
+    const rightArea = Math.max(0, right.maxX - right.minX) * Math.max(0, right.maxY - right.minY);
+    if (leftArea === rightArea) return 0;
+    return leftArea - rightArea;
+  };
+
+  const findSmallestNodeAtPointWorker = async (
+    point: { x: number; y: number },
+    excludeIds: string[] = [],
+    predicate?: (candidateId: string) => boolean
+  ): Promise<string | undefined> => {
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) {
+      const excluded = new Set(excludeIds);
+      return findSmallestContainingNodeId(
+        spatialRuntime,
+        point,
+        (candidateId) => {
+          if (excluded.has(candidateId)) return false;
+          const node = nodesById.get(candidateId);
+          if (!node || node.visible === false) return false;
+          return predicate ? predicate(candidateId) : true;
+        }
+      );
+    }
+
+    const excluded = new Set(excludeIds);
+    const hits = await runtime.hitTest(point);
+    const filtered = hits
+      .filter((entry) => !excluded.has(entry.id))
+      .filter((entry) => {
+        const node = nodesById.get(entry.id);
+        if (!node || node.visible === false) return false;
+        return predicate ? predicate(entry.id) : true;
+      })
+      .sort(sortBoundsByArea);
+
+    return filtered[0]?.id;
+  };
+
+  const getSelectableHitStackWorker = async (point: { x: number; y: number }): Promise<string[]> => {
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) {
+      return getSelectableHitStack(nodes, point).map((node) => node.id);
+    }
+
+    const hits = await runtime.hitTest(point);
+    return hits
+      .filter((entry) => {
+        const node = nodesById.get(entry.id);
+        return !!node && node.visible !== false && !node.locked;
+      })
+      .sort(sortBoundsByArea)
+      .map((entry) => entry.id);
+  };
+
+  const findInnermostAutoLayoutFrameWorker = async (
+    point: { x: number; y: number },
+    excludeIds: string[] = []
+  ): Promise<string | undefined> => {
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) {
+      return findInnermostAutoLayoutFrame(point.x, point.y, excludeIds);
+    }
+
+    const hits = await runtime.hitTest(point);
+    return findDeepestAutoLayoutContainerFromHits(hits, nodesById, excludeIds);
+  };
+
+  const snapGlobalPositionWorker = async (
+    globalX: number,
+    globalY: number,
+    width: number,
+    height: number,
+    nodeId: string,
+    snapThreshold: number,
+    excludedIds: string[] = []
+  ): Promise<{ x: number; y: number; guides: { x?: number; y?: number }[] }> => {
+    if (!enableSpatialRuntime) return { x: globalX, y: globalY, guides: [] };
+
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) {
+      return snapGlobalPosition(globalX, globalY, width, height, nodeId, snapThreshold, excludedIds);
+    }
+
+    const excluded = new Set(excludedIds);
+    excluded.add(nodeId);
+
+    const queryPadding = snapThreshold + Math.max(width, height) * 0.5;
+    const hits = await runtime.search({
+      minX: globalX - queryPadding,
+      minY: globalY - queryPadding,
+      maxX: globalX + width + queryPadding,
+      maxY: globalY + height + queryPadding,
+    });
+
+    const candidates = hits.filter((entry) => !excluded.has(entry.id));
+    const snapped = snapNodeToSpatialCandidates({
+      nodeId,
+      globalX,
+      globalY,
+      width,
+      height,
+      snapThreshold,
+      persistentGuides,
+      candidates,
+    });
+
+    return { x: snapped.x, y: snapped.y, guides: snapped.snapLines };
+  };
+
+  const setAutoLayoutPreviewFromParent = (
+    autoLayoutParentId: string | undefined,
+    pointerCenter: { x: number; y: number },
+    excludedIds: string[]
+  ) => {
+    if (!autoLayoutParentId) {
+      setAutoLayoutDropPreview(null);
+      return;
+    }
+
+    const autoLayoutParent = nodes.find((entry) => entry.id === autoLayoutParentId);
+    if (!autoLayoutParent || !isFrameLikeNode(autoLayoutParent) || autoLayoutParent.layoutMode === 'none') {
+      setAutoLayoutDropPreview(null);
+      return;
+    }
+
+    const siblingCandidates = nodes.filter((entry) => entry.parentId === autoLayoutParentId && !excludedIds.includes(entry.id));
+    setAutoLayoutDropPreview(getAutoLayoutDropPreview(autoLayoutParent, siblingCandidates, pointerCenter, getGlobalPosition));
   };
 
   const evaluateInteractionCondition = (condition: Interaction['condition']) => {
@@ -1064,7 +1210,7 @@ export const Canvas = ({
     pushHistory();
   };
 
-  const handleMouseDown = (e: CanvasMouseEvent) => {
+  const handleMouseDown = (e: CanvasSceneEvent) => {
     setContextMenu(null);
 
     if (e.evt.button === 2) {
@@ -1173,7 +1319,7 @@ export const Canvas = ({
     }
   };
 
-  const handleMouseMove = (e: CanvasMouseEvent) => {
+  const handleMouseMove = (e: CanvasSceneEvent) => {
     const stage = stageRef.current;
     if (!stage) return;
 
@@ -1293,15 +1439,53 @@ export const Canvas = ({
       });
     } else if (tool === 'direct-select') {
       const point = getPointerPosition();
-      const hits = getSelectableHitStack(nodes, point).map((node) => node.id);
-      setDirectSelectHoverIds((current) => {
-        if (current.length === hits.length && current.every((id, index) => id === hits[index])) {
-          return current;
-        }
-        return hits;
+      if (useWorkerSpatialRuntime) {
+        const requestId = ++directSelectHitRequestRef.current;
+        void getSelectableHitStackWorker(point).then((hits) => {
+          if (requestId !== directSelectHitRequestRef.current) return;
+          setDirectSelectHoverIds((current) => {
+            if (current.length === hits.length && current.every((id, index) => id === hits[index])) {
+              return current;
+            }
+            return hits;
+          });
+        });
+      } else {
+        const hits = getSelectableHitStack(nodes, point).map((node) => node.id);
+        setDirectSelectHoverIds((current) => {
+          if (current.length === hits.length && current.every((id, index) => id === hits[index])) {
+            return current;
+          }
+          return hits;
+        });
+      }
+    } else {
+      directSelectHitRequestRef.current += 1;
+      if (directSelectHoverIds.length > 0) {
+        setDirectSelectHoverIds([]);
+      }
+    }
+
+    if (isDrawing || selectionRect || zoomRect) {
+      return;
+    }
+
+    const hoverPoint = getPointerPosition();
+    if (useWorkerSpatialRuntime) {
+      const requestId = ++hoverHitRequestRef.current;
+      void findSmallestNodeAtPointWorker(hoverPoint, [], (candidateId) => {
+        const candidate = nodesById.get(candidateId);
+        return !!candidate;
+      }).then((hoveredNodeId) => {
+        if (requestId !== hoverHitRequestRef.current) return;
+        setHoveredNode(hoveredNodeId ?? null);
       });
-    } else if (directSelectHoverIds.length > 0) {
-      setDirectSelectHoverIds([]);
+    } else {
+      const hoveredNodeId = findSmallestContainingNodeId(spatialRuntime, hoverPoint, (candidateId) => {
+        const candidate = nodesById.get(candidateId);
+        return !!candidate && candidate.visible !== false;
+      });
+      setHoveredNode(hoveredNodeId ?? null);
     }
   };
 
@@ -1453,7 +1637,7 @@ export const Canvas = ({
     }
   };
 
-  const handleCanvasContextMenu = (e: Konva.KonvaEventObject<PointerEvent>) => {
+  const handleCanvasContextMenu = (e: CanvasSceneEvent) => {
     e.evt.preventDefault();
     const pointer = getPointerPosition();
     const targetId = e.target?.id?.();
@@ -1594,7 +1778,7 @@ export const Canvas = ({
     }
   };
 
-  const handleWheel = (e: CanvasWheelEvent) => {
+  const handleWheel = (e: CanvasSceneEvent) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
     if (!stage) return;
@@ -1619,7 +1803,264 @@ export const Canvas = ({
     });
   };
 
-  const handleNodeDragStart = (e: CanvasMouseEvent) => {
+  const handlePureCanvasWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    const pointer = updatePurePointer(event.clientX, event.clientY);
+
+    const scaleBy = 1.1;
+    const oldScale = viewport.zoom;
+    const nextScale = event.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
+    const zoom = Math.min(Math.max(nextScale, 0.05), 20);
+
+    setViewport({
+      zoom,
+      x: pointer.localX - pointer.x * zoom,
+      y: pointer.localY - pointer.y * zoom,
+    });
+  };
+
+  const findSelectableNodeAtPoint = async (point: { x: number; y: number }): Promise<string | undefined> => {
+    if (useWorkerSpatialRuntime) {
+      return findSmallestNodeAtPointWorker(point, [], (candidateId) => {
+        const node = nodesById.get(candidateId);
+        return !!node && node.visible !== false && !node.locked;
+      });
+    }
+
+    return findSmallestContainingNodeId(spatialRuntime, point, (candidateId) => {
+      const node = nodesById.get(candidateId);
+      return !!node && node.visible !== false && !node.locked;
+    });
+  };
+
+  const handlePureCanvasPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    setContextMenu(null);
+    const pointer = updatePurePointer(event.clientX, event.clientY);
+
+    if (event.button === 2) return;
+
+    if (event.button === 1 || tool === 'hand' || spaceHandActive) {
+      setIsPanning(true);
+      return;
+    }
+
+    if (mode === 'prototype') {
+      return;
+    }
+
+    if (editingId) {
+      const target = nodes.find((entry): entry is TextNode => entry.id === editingId && entry.type === 'text');
+      if (target) {
+        updateNode(editingId, buildTextEditPatch(target, editingText));
+      }
+      pushHistory();
+      setEditingId(null);
+    }
+
+    const isActiveDrawingTool = isRegisteredDrawingTool(tool);
+
+    if (tool === 'zoom') {
+      setZoomRect({ x: pointer.x, y: pointer.y, width: 0, height: 0 });
+      return;
+    }
+
+    if (isActiveDrawingTool) {
+      const parentId = findInnermostFrame(pointer.x, pointer.y);
+      let finalX = pointer.x;
+      let finalY = pointer.y;
+
+      if (parentId) {
+        const parentPos = getGlobalPosition(parentId);
+        finalX -= parentPos.x;
+        finalY -= parentPos.y;
+      }
+
+      const node = createDefaultNode(tool as DrawingToolType, finalX, finalY);
+      node.parentId = parentId;
+      node.width = 0;
+      node.height = 0;
+      setNewNode(node);
+      setIsDrawing(true);
+      setSelectedIds([]);
+      clearPathAnchorSelection();
+      setSelectionRect({ x: pointer.x, y: pointer.y, width: 0, height: 0 });
+      return;
+    }
+
+    if (tool === 'pen') {
+      if (penPoints.length > 2) {
+        const first = penPoints[0];
+        const distance = Math.hypot(pointer.x - first.x, pointer.y - first.y);
+        if (distance < 10 / viewport.zoom) {
+          finalizePenPath(true);
+          return;
+        }
+      }
+
+      setIsPenDragging(true);
+      setPenPoints([...penPoints, { x: pointer.x, y: pointer.y, cp1: { x: pointer.x, y: pointer.y }, cp2: { x: pointer.x, y: pointer.y } }]);
+      return;
+    }
+
+    if (!isSelectionTool(tool)) return;
+
+    void findSelectableNodeAtPoint(pointer).then((hitId) => {
+      if (!hitId) {
+        setSelectionRect({ x: pointer.x, y: pointer.y, width: 0, height: 0 });
+        if (!event.shiftKey) setSelectedIds([]);
+        directSelectCycleRef.current = null;
+        clearPathAnchorSelection();
+        return;
+      }
+
+      if (event.shiftKey) {
+        setSelectedIds(Array.from(new Set([...selectedIds, hitId])));
+      } else {
+        setSelectedIds([hitId]);
+      }
+      directSelectCycleRef.current = null;
+      clearPathAnchorSelection();
+    });
+  };
+
+  const handlePureCanvasPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const pointer = updatePurePointer(event.clientX, event.clientY);
+
+    if (isPanning) {
+      if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
+      setViewport({
+        ...viewport,
+        x: viewport.x + event.movementX,
+        y: viewport.y + event.movementY,
+      });
+      return;
+    }
+
+    if (tool === 'pen' && isPenDragging) {
+      if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
+      const newPoints = [...penPoints];
+      const last = newPoints[newPoints.length - 1];
+      const dx = pointer.x - last.x;
+      const dy = pointer.y - last.y;
+      last.cp1 = { x: last.x - dx, y: last.y - dy };
+      last.cp2 = { x: last.x + dx, y: last.y + dy };
+      setPenPoints(newPoints);
+      return;
+    }
+
+    if (isDrawing && newNode) {
+      let localX = pointer.x;
+      let localY = pointer.y;
+
+      if (newNode.parentId) {
+        const parentPos = getGlobalPosition(newNode.parentId);
+        localX -= parentPos.x;
+        localY -= parentPos.y;
+      }
+
+      if (newNode.type === 'text') {
+        const w = localX - newNode.x;
+        const h = localY - newNode.y;
+        setNewNode({
+          ...newNode,
+          width: w,
+          height: h,
+          fontSize: Math.max(12, Math.abs(Math.floor(h / 1.2))),
+        });
+      } else {
+        setNewNode({
+          ...newNode,
+          width: localX - newNode.x,
+          height: localY - newNode.y,
+        });
+      }
+      return;
+    }
+
+    if (selectionRect) {
+      setSelectionRect({
+        ...selectionRect,
+        width: pointer.x - selectionRect.x,
+        height: pointer.y - selectionRect.y,
+      });
+      return;
+    }
+
+    if (zoomRect) {
+      setZoomRect({
+        ...zoomRect,
+        width: pointer.x - zoomRect.x,
+        height: pointer.y - zoomRect.y,
+      });
+      return;
+    }
+
+    if (tool === 'direct-select') {
+      if (useWorkerSpatialRuntime) {
+        const requestId = ++directSelectHitRequestRef.current;
+        void getSelectableHitStackWorker(pointer).then((hits) => {
+          if (requestId !== directSelectHitRequestRef.current) return;
+          setDirectSelectHoverIds((current) => {
+            if (current.length === hits.length && current.every((id, index) => id === hits[index])) return current;
+            return hits;
+          });
+        });
+      } else {
+        const hits = getSelectableHitStack(nodes, pointer).map((node) => node.id);
+        setDirectSelectHoverIds((current) => {
+          if (current.length === hits.length && current.every((id, index) => id === hits[index])) return current;
+          return hits;
+        });
+      }
+    } else {
+      directSelectHitRequestRef.current += 1;
+      if (directSelectHoverIds.length > 0) setDirectSelectHoverIds([]);
+    }
+
+    const requestId = ++hoverHitRequestRef.current;
+    void findSmallestNodeAtPointWorker(pointer, [], (candidateId) => {
+      const node = nodesById.get(candidateId);
+      return !!node && node.visible !== false;
+    }).then((hoveredNodeId) => {
+      if (requestId !== hoverHitRequestRef.current) return;
+      setHoveredNode(hoveredNodeId ?? null);
+    });
+  };
+
+  const handlePureCanvasPointerUp = () => {
+    handleMouseUp();
+  };
+
+  const handlePureCanvasPointerLeave = () => {
+    setDirectSelectHoverIds([]);
+    setAutoLayoutDropPreview(null);
+    setHoveredNode(null);
+    if (isPanning) {
+      setIsPanning(false);
+    }
+  };
+
+  const handlePureCanvasContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    const pointer = updatePurePointer(event.clientX, event.clientY);
+    void findSelectableNodeAtPoint(pointer).then((targetId) => {
+      const isTargetSelected = targetId ? selectedIds.includes(targetId) : false;
+      const hasMultiSelection = selectedIds.length > 1;
+
+      if (targetId && nodes.some((node) => node.id === targetId) && !isTargetSelected && !hasMultiSelection) {
+        setSelectedIds([targetId]);
+      }
+
+      setContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        canvasX: pointer.x,
+        canvasY: pointer.y,
+      });
+    });
+  };
+
+  const handleNodeDragStart = (e: CanvasSceneEvent) => {
     if (mode === 'prototype') return;
     const id = e.target.id();
     setAutoLayoutDropPreview(null);
@@ -1628,7 +2069,7 @@ export const Canvas = ({
     }
   };
 
-  const handleNodeDragMove = (e: CanvasMouseEvent) => {
+  const handleNodeDragMove = (e: CanvasSceneEvent) => {
     if (mode === 'prototype') return;
     const node = e.target;
     const stage = stageRef.current;
@@ -1649,35 +2090,46 @@ export const Canvas = ({
     
     const currentGlobalX = clampCoord(parentGlobal.x + node.x() - anchorOffsetX, draggedModel.x);
     const currentGlobalY = clampCoord(parentGlobal.y + node.y() - anchorOffsetY, draggedModel.y);
+    const excludedIds = [nodeId, ...collectDescendantIds(nodeId)];
+
+    if (useWorkerSpatialRuntime) {
+      const requestId = ++dragSpatialRequestRef.current;
+      void snapGlobalPositionWorker(currentGlobalX, currentGlobalY, currentWidth, currentHeight, nodeId, snapThreshold, excludedIds).then(async (snapped) => {
+        if (requestId !== dragSpatialRequestRef.current) return;
+
+        node.x(clampCoord(snapped.x - parentGlobal.x + anchorOffsetX, node.x()));
+        node.y(clampCoord(snapped.y - parentGlobal.y + anchorOffsetY, node.y()));
+        setSnapLines(snapped.guides);
+
+        const pointerCenter = {
+          x: snapped.x + currentWidth / 2,
+          y: snapped.y + currentHeight / 2,
+        };
+        const autoLayoutParentId = await findInnermostAutoLayoutFrameWorker(pointerCenter, excludedIds);
+        if (requestId !== dragSpatialRequestRef.current) return;
+
+        setAutoLayoutPreviewFromParent(autoLayoutParentId, pointerCenter, excludedIds);
+        node.getLayer()?.batchDraw();
+      });
+      return;
+    }
+
     const snapped = snapGlobalPosition(currentGlobalX, currentGlobalY, currentWidth, currentHeight, nodeId, snapThreshold);
 
     node.x(clampCoord(snapped.x - parentGlobal.x + anchorOffsetX, node.x()));
     node.y(clampCoord(snapped.y - parentGlobal.y + anchorOffsetY, node.y()));
     setSnapLines(snapped.guides);
 
-    const excludedIds = [nodeId, ...collectDescendantIds(nodeId)];
     const pointerCenter = {
       x: snapped.x + currentWidth / 2,
       y: snapped.y + currentHeight / 2,
     };
     const autoLayoutParentId = findInnermostAutoLayoutFrame(pointerCenter.x, pointerCenter.y, excludedIds);
-
-    if (!autoLayoutParentId) {
-      setAutoLayoutDropPreview(null);
-      return;
-    }
-
-    const autoLayoutParent = nodes.find((entry) => entry.id === autoLayoutParentId);
-    if (!autoLayoutParent || !isFrameLikeNode(autoLayoutParent) || autoLayoutParent.layoutMode === 'none') {
-      setAutoLayoutDropPreview(null);
-      return;
-    }
-
-    const siblingCandidates = nodes.filter((entry) => entry.parentId === autoLayoutParentId && !excludedIds.includes(entry.id));
-    setAutoLayoutDropPreview(getAutoLayoutDropPreview(autoLayoutParent, siblingCandidates, pointerCenter, getGlobalPosition));
+    setAutoLayoutPreviewFromParent(autoLayoutParentId, pointerCenter, excludedIds);
   };
 
-  const handleNodeUpdate = (e: CanvasMouseEvent) => {
+  const handleNodeUpdate = (e: CanvasSceneEvent) => {
+    dragSpatialRequestRef.current += 1;
     const konvaNode = e.target;
     const nodeId = konvaNode.id();
     const nodeData = nodes.find(n => n.id === nodeId);
@@ -1809,1419 +2261,6 @@ export const Canvas = ({
     pushHistory();
   };
 
-  const renderAutoLayoutDropPreview = () => {
-    if (!autoLayoutDropPreview) return null;
-
-    if (autoLayoutDropPreview.marker.kind === 'box') {
-      const marker = autoLayoutDropPreview.marker;
-      return (
-        <Group listening={false}>
-          <Rect
-            x={marker.x}
-            y={marker.y}
-            width={marker.width}
-            height={marker.height}
-            stroke="#22C55E"
-            strokeWidth={2 / viewport.zoom}
-            dash={[8 / viewport.zoom, 4 / viewport.zoom]}
-            fill="rgba(34, 197, 94, 0.08)"
-            cornerRadius={8 / viewport.zoom}
-          />
-          <Text
-            x={marker.x}
-            y={marker.y - (18 / viewport.zoom)}
-            text={autoLayoutDropPreview.label}
-            fontSize={11 / viewport.zoom}
-            fontFamily="Inter"
-            fill="#BBF7D0"
-          />
-        </Group>
-      );
-    }
-
-    const marker = autoLayoutDropPreview.marker;
-    const isVertical = marker.orientation === 'vertical';
-    const labelWidth = 96 / viewport.zoom;
-    const labelHeight = 18 / viewport.zoom;
-    const labelX = isVertical ? marker.x - labelWidth / 2 : marker.x;
-    const labelY = isVertical ? marker.y - (22 / viewport.zoom) : marker.y - (26 / viewport.zoom);
-
-    return (
-      <Group listening={false}>
-        <Line
-          points={isVertical
-            ? [marker.x, marker.y, marker.x, marker.y + marker.length]
-            : [marker.x, marker.y, marker.x + marker.length, marker.y]}
-          stroke="#22C55E"
-          strokeWidth={2.5 / viewport.zoom}
-          lineCap="round"
-          shadowColor="#22C55E"
-          shadowBlur={10 / viewport.zoom}
-          shadowOpacity={0.5}
-        />
-        <Circle
-          x={marker.x}
-          y={marker.y}
-          radius={3.5 / viewport.zoom}
-          fill="#22C55E"
-        />
-        <Circle
-          x={isVertical ? marker.x : marker.x + marker.length}
-          y={isVertical ? marker.y + marker.length : marker.y}
-          radius={3.5 / viewport.zoom}
-          fill="#22C55E"
-        />
-        <Group x={labelX} y={labelY}>
-          <Rect
-            width={labelWidth}
-            height={labelHeight}
-            fill="rgba(20, 83, 45, 0.92)"
-            stroke="#22C55E"
-            strokeWidth={1 / viewport.zoom}
-            cornerRadius={6 / viewport.zoom}
-          />
-          <Text
-            y={3 / viewport.zoom}
-            width={labelWidth}
-            text={autoLayoutDropPreview.label}
-            fontSize={10 / viewport.zoom}
-            fontFamily="Inter"
-            fill="#DCFCE7"
-            align="center"
-          />
-        </Group>
-      </Group>
-    );
-  };
-
-  const renderSingleNode = (node: SceneNode) => {
-    const isSelected = selectedIds.includes(node.id);
-    const resolveVariableBinding = (bindingKey: 'fill' | 'stroke' | 'opacity' | 'text') => {
-      const variableId = node.variableBindings?.[bindingKey];
-      if (!variableId) return undefined;
-      return variables.find((entry) => entry.id === variableId)?.value;
-    };
-
-    const boundFillValue = resolveVariableBinding('fill');
-    const boundStrokeValue = resolveVariableBinding('stroke');
-    const boundOpacityValue = resolveVariableBinding('opacity');
-    const boundTextValue = resolveVariableBinding('text');
-
-    const effectiveFill = typeof boundFillValue === 'string' ? boundFillValue : (node.fill || '#D9D9D9');
-    const effectiveStroke = typeof boundStrokeValue === 'string' ? boundStrokeValue : (node.stroke || '#000000');
-    const numericOpacity = typeof boundOpacityValue === 'number' ? boundOpacityValue : Number(boundOpacityValue);
-    const effectiveOpacity = Number.isFinite(numericOpacity)
-      ? Math.max(0, Math.min(1, numericOpacity))
-      : (node.opacity || 1);
-    const effectiveText = node.type === 'text' && typeof boundTextValue !== 'undefined'
-      ? String(boundTextValue)
-      : (node.type === 'text' ? node.text : undefined);
-
-    const getVisibleFills = (paints: Paint[] | undefined, fallback: string): Paint[] => {
-      const visible = (paints || []).filter((paint) => paint.visible !== false);
-      if (visible.length > 0) return visible;
-      return [{ id: `${node.id}-fallback-fill`, type: 'solid', color: fallback, opacity: 1, visible: true }];
-    };
-
-    const getVisibleStrokes = (paints: Paint[] | undefined, fallback: string): Paint[] => {
-      const visible = (paints || []).filter((paint) => paint.visible !== false);
-      if (visible.length > 0) return visible;
-      return [{ id: `${node.id}-fallback-stroke`, type: 'solid', color: fallback, opacity: 1, visible: true }];
-    };
-
-    const getLinearGradientPoints = (paint: Paint) => {
-      const angle = Number.isFinite(paint.gradientAngle) ? Number(paint.gradientAngle) : 0;
-      const radians = (angle * Math.PI) / 180;
-      const cx = node.width / 2;
-      const cy = node.height / 2;
-      const dx = Math.cos(radians) * (node.width / 2);
-      const dy = Math.sin(radians) * (node.height / 2);
-      return {
-        start: { x: cx - dx, y: cy - dy },
-        end: { x: cx + dx, y: cy + dy },
-      };
-    };
-
-    const getGradientStops = (paint: Paint): (number | string)[] => {
-      const rawStops = (paint.gradientStops || []).map((stop) => ({
-        offset: Math.min(1, Math.max(0, Number.isFinite(stop.offset) ? stop.offset : 0)),
-        color: stop.color,
-      }));
-      const stops = rawStops.length > 0 ? rawStops : [{ offset: 0, color: '#FFFFFF' }, { offset: 1, color: '#000000' }];
-      const sorted = [...stops].sort((a, b) => a.offset - b.offset);
-      const result: (number | string)[] = [];
-      sorted.forEach((stop) => {
-        result.push(stop.offset, stop.color);
-      });
-      return result;
-    };
-
-    const getPaintFillProps = (paint: Paint | undefined, fallback: string) => {
-      const safePaint = paint || { id: `${node.id}-safe`, type: 'solid' as const, color: fallback, opacity: 1, visible: true };
-      const opacity = effectiveOpacity * (safePaint.opacity || 1);
-
-      if (safePaint.type === 'solid') {
-        return { fill: safePaint.color || fallback, opacity };
-      }
-
-      if (safePaint.type === 'gradient-radial') {
-        const center = safePaint.gradientCenter || { x: 0.5, y: 0.5 };
-        const radius = Math.max(0.05, Math.min(1, safePaint.gradientRadius ?? 0.5));
-        const baseRadius = Math.min(Math.abs(node.width), Math.abs(node.height)) * radius;
-        return {
-          fillRadialGradientStartPoint: { x: center.x * node.width, y: center.y * node.height },
-          fillRadialGradientStartRadius: 0,
-          fillRadialGradientEndPoint: { x: center.x * node.width, y: center.y * node.height },
-          fillRadialGradientEndRadius: baseRadius,
-          fillRadialGradientColorStops: getGradientStops(safePaint),
-          opacity,
-        };
-      }
-
-      const { start, end } = getLinearGradientPoints(safePaint);
-      return {
-        fillLinearGradientStartPoint: start,
-        fillLinearGradientEndPoint: end,
-        fillLinearGradientColorStops: getGradientStops(safePaint),
-        opacity,
-      };
-    };
-
-    const fillPaints = getVisibleFills(node.fills, effectiveFill);
-    const topFillPaint = fillPaints[fillPaints.length - 1];
-    const underFillPaints = fillPaints.slice(0, -1);
-    let fillProps = getPaintFillProps(topFillPaint, effectiveFill);
-
-    const strokePaints = getVisibleStrokes(node.strokes, effectiveStroke);
-    const topStrokePaint = strokePaints[strokePaints.length - 1];
-    const strokeColor = topStrokePaint?.type === 'solid' ? (topStrokePaint.color || effectiveStroke) : effectiveStroke;
-    const strokeOpacity = effectiveOpacity * (topStrokePaint?.opacity || 1);
-
-    // Keep mask visuals readable and non-destructive on canvas.
-    if (node.isMask) {
-      fillProps = { fill: 'rgba(59, 130, 246, 0.18)', opacity: 1 };
-      underFillPaints.length = 0;
-    }
-    const cornerData = getSanitizedCornerData(node);
-    const cornerRadiusArray = cornerData.cornerRadiusArray;
-    const smoothCornerRadius = cornerData.uniform;
-    const smoothCornerSmoothing = cornerData.smoothing;
-
-    // Effects
-    const effects: Effect[] = node.effects || [];
-    const dropShadow = effects.find((effect) => effect.visible !== false && effect.type === 'drop-shadow');
-    const shadowProps = dropShadow ? {
-        shadowColor: dropShadow.color,
-        shadowBlur: dropShadow.radius,
-        shadowOffset: dropShadow.offset,
-        shadowOpacity: 1,
-    } : {};
-
-    const layerBlur = effects.find((effect) => effect.visible !== false && effect.type === 'layer-blur');
-    const backgroundBlur = effects.find((effect) => effect.visible !== false && effect.type === 'background-blur');
-    const innerShadow = effects.find((effect) => effect.visible !== false && effect.type === 'inner-shadow');
-    const blurProps = layerBlur ? {
-        filters: [Konva.Filters.Blur],
-        blurRadius: layerBlur.radius,
-    } : {};
-
-    const innerShadowColor = innerShadow?.color || 'rgba(0, 0, 0, 0.65)';
-    const innerShadowOffset = innerShadow?.offset || { x: 0, y: 0 };
-    const innerShadowBlur = Math.max(0, innerShadow?.radius || 0);
-
-    const backgroundBlurOverlayProps = backgroundBlur
-      ? {
-          filters: [Konva.Filters.Blur],
-          blurRadius: Math.max(0, backgroundBlur.radius || 0),
-          opacity: 0.16,
-          fill: 'rgba(255,255,255,0.32)',
-        }
-      : null;
-
-    const blendModeMap: Record<string, GlobalCompositeOperation> = {
-      'pass-through': 'source-over',
-      normal: 'source-over',
-      multiply: 'multiply',
-      screen: 'screen',
-      overlay: 'overlay',
-    };
-
-    const { key: _key, ...konvaProps } = {
-      id: node.id,
-      key: node.id,
-      x: node.x,
-      y: node.y,
-      width: node.width,
-      height: node.height,
-      rotation: node.rotation,
-      globalCompositeOperation: blendModeMap[node.blendMode || 'normal'] || 'source-over',
-      draggable:
-        node.draggable &&
-        !node.locked &&
-        !isPanning &&
-        (mode === 'prototype'
-          ? (node.interactions || []).some((interaction) => interaction.trigger === 'onDrag')
-          : isSelectionTool(tool)),
-      listening: node.visible,
-      dash: node.isMask ? [8 / viewport.zoom, 4 / viewport.zoom] : undefined,
-      cornerRadius: cornerRadiusArray,
-      ...shadowProps,
-      ...blurProps,
-      onDragMove: handleNodeDragMove,
-      onDragStart: handleNodeDragStart,
-      onDragEnd: handleNodeUpdate,
-      onTransformEnd: handleNodeUpdate,
-        onTransform: (e: CanvasMouseEvent) => {
-          const nodeTarget = e.target;
-          if (isFrameLikeNode(node)) {
-            return;
-          }
-          const scaleX = nodeTarget.scaleX();
-          const scaleY = nodeTarget.scaleY();
-          
-          const isShift = e.evt.shiftKey;
-          const isAlt = e.evt.altKey;
-
-          const newWidth = clampSize(nodeTarget.width() * scaleX, node.width);
-          const newHeight = clampSize(nodeTarget.height() * scaleY, node.height);
-
-          // Constraints: if text node with hug, we might want to restrict height
-          // but Konva Transformer generally changes width/height directly here.
-          
-          nodeTarget.setAttrs({
-            width: newWidth,
-            height: newHeight,
-            scaleX: 1,
-            scaleY: 1
-          });
-
-          if (isAlt) {
-              // Center scaling is natively handled by Transformer if centeredScaling=true,
-              // but we can manually adjust if needed or just rely on Konva.
-              // For now we improve the min-size behavior.
-          }
-      },
-      onClick: (e: CanvasMouseEvent) => {
-        if (node.locked) return;
-        if (typeof e.evt.button === 'number' && e.evt.button !== 0) return;
-
-        if (mode === 'prototype') {
-          e.cancelBubble = true;
-          runNodeInteractions(node, 'onClick');
-          return;
-        }
-
-        e.cancelBubble = true;
-        if (tool === 'direct-select') {
-          const point = getPointerPosition();
-          const cycle = resolveDirectSelectCycle(nodes, point, directSelectCycleRef.current);
-          directSelectCycleRef.current = cycle.cycle;
-          if (cycle.node) {
-            if (e.evt.shiftKey) {
-              setSelectedIds(Array.from(new Set([...selectedIds, cycle.node.id])));
-            } else {
-              setSelectedIds([cycle.node.id]);
-            }
-            clearPathAnchorSelection();
-            return;
-          }
-        }
-        directSelectCycleRef.current = null;
-        if (e.evt.shiftKey) {
-          setSelectedIds(Array.from(new Set([...selectedIds, node.id])));
-        } else {
-          setSelectedIds([node.id]);
-        }
-        clearPathAnchorSelection();
-      },
-      onDblClick: () => handleTextDblClick(node),
-      onMouseEnter: () => {
-        useStore.getState().setHoveredId(node.id);
-        runNodeInteractions(node, 'onHover');
-      },
-      onMouseLeave: () => useStore.getState().setHoveredId(null),
-    };
-
-    const isComponentRelated = node.type === 'component' || node.type === 'instance';
-    const selectionColor = isComponentRelated ? '#A855F7' : '#6366F1';
-    
-    const selectionProps = isSelected ? {
-        stroke: selectionColor,
-        strokeWidth: 2 / viewport.zoom,
-        dash: node.type === 'instance' ? [4 / viewport.zoom, 2 / viewport.zoom] : undefined,
-        listening: false,
-    } : null;
-
-    const isHovered = useStore.getState().hoveredId === node.id && !isSelected;
-    const hoverProps = isHovered ? {
-        stroke: selectionColor,
-        strokeWidth: 1 / viewport.zoom,
-        listening: false,
-        opacity: 0.5
-    } : null;
-
-    if (node.type === 'frame' || node.type === 'section' || node.type === 'group' || node.type === 'component' || node.type === 'instance') {
-        const hasSmoothing = smoothCornerSmoothing > 0;
-        const isTopLevel = !node.parentId;
-        
-        return (
-            <Group key={node.id}>
-                {isTopLevel && (
-                    <Text 
-                        x={node.x}
-                        y={node.y - (14 / viewport.zoom)}
-                        text={node.name}
-                        fontSize={11 / viewport.zoom}
-                        fontFamily="Inter"
-                        fill={isSelected ? selectionColor : "#A1A1A1"}
-                        fontStyle="600"
-                    />
-                )}
-                <Group 
-                    {...konvaProps} 
-                    name="frame"
-                    clipFunc={node.clipsContent ? (ctx) => {
-                      const r = cornerData.corners;
-                        const w = node.width;
-                        const h = node.height;
-                        ctx.beginPath();
-                        ctx.moveTo(r.topLeft, 0);
-                        ctx.lineTo(w - r.topRight, 0);
-                        ctx.quadraticCurveTo(w, 0, w, r.topRight);
-                        ctx.lineTo(w, h - r.bottomRight);
-                        ctx.quadraticCurveTo(w, h, w - r.bottomRight, h);
-                        ctx.lineTo(r.bottomLeft, h);
-                        ctx.quadraticCurveTo(0, h, 0, h - r.bottomLeft);
-                        ctx.lineTo(0, r.topLeft);
-                        ctx.quadraticCurveTo(0, 0, r.topLeft, 0);
-                        ctx.closePath();
-                    } : undefined}
-                >
-                  {underFillPaints.map((paint) => {
-                    const layerProps = getPaintFillProps(paint, effectiveFill);
-                    if (hasSmoothing) {
-                      return (
-                        <Path
-                          key={`${node.id}-under-${paint.id}`}
-                          data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                          {...layerProps}
-                          listening={false}
-                        />
-                      );
-                    }
-                    return (
-                      <Rect
-                        key={`${node.id}-under-${paint.id}`}
-                        width={node.width}
-                        height={node.height}
-                        cornerRadius={cornerRadiusArray}
-                        {...layerProps}
-                        lineJoin="round"
-                        listening={false}
-                      />
-                    );
-                  })}
-                    {hasSmoothing ? (
-                        <Path 
-                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                            {...fillProps}
-                        />
-                    ) : (
-                        <Rect 
-                            width={node.width} 
-                            height={node.height} 
-                            cornerRadius={cornerRadiusArray}
-                            {...fillProps}
-                            lineJoin="round"
-                        />
-                    )}
-                  {node.strokeWidth > 0 && (
-                    hasSmoothing ? (
-                      <Path
-                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                        fillEnabled={false}
-                        stroke={strokeColor}
-                        strokeWidth={node.strokeWidth}
-                        opacity={strokeOpacity}
-                        listening={false}
-                      />
-                    ) : (
-                      <Rect
-                        width={node.width}
-                        height={node.height}
-                        cornerRadius={cornerRadiusArray}
-                        fillEnabled={false}
-                        stroke={strokeColor}
-                        strokeWidth={node.strokeWidth}
-                        opacity={strokeOpacity}
-                        lineJoin="round"
-                        listening={false}
-                      />
-                    )
-                  )}
-                  {backgroundBlurOverlayProps && (
-                    hasSmoothing ? (
-                      <Path
-                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                        {...backgroundBlurOverlayProps}
-                        listening={false}
-                      />
-                    ) : (
-                      <Rect
-                        width={node.width}
-                        height={node.height}
-                        cornerRadius={cornerRadiusArray}
-                        {...backgroundBlurOverlayProps}
-                        listening={false}
-                      />
-                    )
-                  )}
-                  {innerShadow && (
-                    hasSmoothing ? (
-                      <Path
-                        data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                        fill={innerShadowColor}
-                        opacity={0.12}
-                        shadowColor={innerShadowColor}
-                        shadowBlur={innerShadowBlur}
-                        shadowOffset={innerShadowOffset}
-                        globalCompositeOperation="source-atop"
-                        listening={false}
-                      />
-                    ) : (
-                      <Rect
-                        width={node.width}
-                        height={node.height}
-                        cornerRadius={cornerRadiusArray}
-                        fill={innerShadowColor}
-                        opacity={0.12}
-                        shadowColor={innerShadowColor}
-                        shadowBlur={innerShadowBlur}
-                        shadowOffset={innerShadowOffset}
-                        globalCompositeOperation="source-atop"
-                        listening={false}
-                      />
-                    )
-                  )}
-                    {selectionProps && (
-                        <Rect 
-                            width={node.width}
-                            height={node.height}
-                            cornerRadius={cornerRadiusArray}
-                            {...selectionProps}
-                        />
-                    )}
-                    {hoverProps && (
-                         <Rect 
-                            width={node.width}
-                            height={node.height}
-                            cornerRadius={cornerRadiusArray}
-                            {...hoverProps}
-                        />
-                    )}
-                    {isHovered && (node.type === 'frame' || node.type === 'section' || node.type === 'group' || node.type === 'component' || node.type === 'instance') && node.layoutMode !== 'none' && (
-                        <Group listening={false}>
-                            {node.padding.top > 0 && <Rect x={0} y={0} width={node.width} height={node.padding.top} fill="rgba(255, 0, 255, 0.15)" />}
-                            {node.padding.bottom > 0 && <Rect x={0} y={node.height - node.padding.bottom} width={node.width} height={node.padding.bottom} fill="rgba(255, 0, 255, 0.15)" />}
-                            {node.padding.left > 0 && <Rect x={0} y={0} width={node.padding.left} height={node.height} fill="rgba(255, 0, 255, 0.15)" />}
-                            {node.padding.right > 0 && <Rect x={node.width - node.padding.right} y={0} width={node.padding.right} height={node.height} fill="rgba(255, 0, 255, 0.15)" />}
-                            {node.gap > 0 && nodes.filter(c => c.parentId === node.id).slice(1).map((child, idx) => {
-                                if (node.layoutMode === 'horizontal') {
-                                    return <Rect key={idx} x={child.x - node.gap} y={0} width={node.gap} height={node.height} fill="rgba(255, 0, 255, 0.2)" />;
-                                } else {
-                                    return <Rect key={idx} x={0} y={child.y - node.gap} width={node.width} height={node.gap} fill="rgba(255, 0, 255, 0.2)" />;
-                                }
-                            })}
-                        </Group>
-                    )}
-                    {renderNodeHierarchy(node.id)}
-                </Group>
-            </Group>
-        );
-    }
-
-    if (node.type === 'rect') {
-      const hasSmoothing = smoothCornerSmoothing > 0;
-        return (
-            <Group key={node.id}>
-          {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, effectiveFill);
-            if (hasSmoothing) {
-              return (
-                <Path
-                  key={`${node.id}-under-${paint.id}`}
-                  x={node.x}
-                  y={node.y}
-                  rotation={node.rotation}
-                  data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                  {...layerProps}
-                  listening={false}
-                  lineJoin="round"
-                />
-              );
-            }
-            return (
-              <Rect
-                key={`${node.id}-under-${paint.id}`}
-                x={node.x}
-                y={node.y}
-                width={node.width}
-                height={node.height}
-                rotation={node.rotation}
-                cornerRadius={cornerRadiusArray}
-                {...layerProps}
-                lineJoin="round"
-                listening={false}
-              />
-            );
-          })}
-                {hasSmoothing ? (
-                    <Path 
-                        {...konvaProps} 
-              {...fillProps}
-              data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)} 
-                        lineJoin="round"
-                    />
-                ) : (
-            <Rect {...konvaProps} {...fillProps} cornerRadius={cornerRadiusArray} lineJoin="round" />
-                )}
-          {node.strokeWidth > 0 && (
-            hasSmoothing ? (
-              <Path
-                x={node.x}
-                y={node.y}
-                rotation={node.rotation}
-                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                fillEnabled={false}
-                stroke={strokeColor}
-                strokeWidth={node.strokeWidth}
-                opacity={strokeOpacity}
-                listening={false}
-                lineJoin="round"
-              />
-            ) : (
-              <Rect
-                x={node.x}
-                y={node.y}
-                width={node.width}
-                height={node.height}
-                rotation={node.rotation}
-                cornerRadius={cornerRadiusArray}
-                fillEnabled={false}
-                stroke={strokeColor}
-                strokeWidth={node.strokeWidth}
-                opacity={strokeOpacity}
-                listening={false}
-                lineJoin="round"
-              />
-            )
-          )}
-          {backgroundBlurOverlayProps && (
-            hasSmoothing ? (
-              <Path
-                x={node.x}
-                y={node.y}
-                rotation={node.rotation}
-                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                {...backgroundBlurOverlayProps}
-                listening={false}
-              />
-            ) : (
-              <Rect
-                x={node.x}
-                y={node.y}
-                width={node.width}
-                height={node.height}
-                rotation={node.rotation}
-                cornerRadius={cornerRadiusArray}
-                {...backgroundBlurOverlayProps}
-                listening={false}
-              />
-            )
-          )}
-          {innerShadow && (
-            hasSmoothing ? (
-              <Path
-                x={node.x}
-                y={node.y}
-                rotation={node.rotation}
-                data={getSuperellipsePath(node.width, node.height, smoothCornerRadius, smoothCornerSmoothing)}
-                fill={innerShadowColor}
-                opacity={0.12}
-                shadowColor={innerShadowColor}
-                shadowBlur={innerShadowBlur}
-                shadowOffset={innerShadowOffset}
-                globalCompositeOperation="source-atop"
-                listening={false}
-              />
-            ) : (
-              <Rect
-                x={node.x}
-                y={node.y}
-                width={node.width}
-                height={node.height}
-                rotation={node.rotation}
-                cornerRadius={cornerRadiusArray}
-                fill={innerShadowColor}
-                opacity={0.12}
-                shadowColor={innerShadowColor}
-                shadowBlur={innerShadowBlur}
-                shadowOffset={innerShadowOffset}
-                globalCompositeOperation="source-atop"
-                listening={false}
-              />
-            )
-          )}
-                {selectionProps && (
-                    <Rect 
-                        x={node.x} y={node.y} width={node.width} height={node.height}
-                        rotation={node.rotation}
-                        cornerRadius={cornerRadiusArray}
-                        {...selectionProps}
-                    />
-                )}
-                {hoverProps && (
-                    <Rect 
-                        x={node.x} y={node.y} width={node.width} height={node.height}
-                        rotation={node.rotation}
-                        cornerRadius={cornerRadiusArray}
-                        {...hoverProps}
-                    />
-                )}
-            </Group>
-        );
-    }
-
-    if (node.type === 'image') {
-        return (
-            <KonvaImage 
-                key={node.id}
-                node={node}
-                konvaProps={konvaProps}
-                selectionProps={selectionProps}
-                hoverProps={hoverProps}
-            />
-        );
-    }
-
-    if (node.type === 'circle') {
-        const radius = Math.abs(node.width / 2);
-        const circleProps = {
-            ...konvaProps,
-            x: node.x + radius,
-            y: node.y + radius,
-        radius: radius,
-        ...fillProps,
-        };
-        return (
-            <Group key={node.id}>
-          {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, effectiveFill);
-            return (
-              <Circle
-                key={`${node.id}-under-${paint.id}`}
-                x={node.x + radius}
-                y={node.y + radius}
-                radius={radius}
-                rotation={node.rotation}
-                {...layerProps}
-                listening={false}
-                lineJoin="round"
-              />
-            );
-          })}
-                <Circle {...circleProps} lineJoin="round" />
-          {node.strokeWidth > 0 && (
-            <Circle
-              x={node.x + radius}
-              y={node.y + radius}
-              radius={radius}
-              rotation={node.rotation}
-              fillEnabled={false}
-              stroke={strokeColor}
-              strokeWidth={node.strokeWidth}
-              opacity={strokeOpacity}
-              listening={false}
-              lineJoin="round"
-            />
-          )}
-          {backgroundBlurOverlayProps && (
-            <Circle
-              x={node.x + radius}
-              y={node.y + radius}
-              radius={radius}
-              rotation={node.rotation}
-              {...backgroundBlurOverlayProps}
-              listening={false}
-            />
-          )}
-          {innerShadow && (
-            <Circle
-              x={node.x + radius}
-              y={node.y + radius}
-              radius={radius}
-              rotation={node.rotation}
-              fill={innerShadowColor}
-              opacity={0.12}
-              shadowColor={innerShadowColor}
-              shadowBlur={innerShadowBlur}
-              shadowOffset={innerShadowOffset}
-              globalCompositeOperation="source-atop"
-              listening={false}
-            />
-          )}
-                {selectionProps && (
-                    <Circle 
-                        x={node.x + radius} y={node.y + radius} radius={radius}
-                        {...selectionProps}
-                    />
-                )}
-                {hoverProps && (
-                    <Circle 
-                        x={node.x + radius} y={node.y + radius} radius={radius}
-                        {...hoverProps}
-                    />
-                )}
-            </Group>
-        );
-    }
-    if (node.type === 'ellipse') {
-        const radiusX = Math.abs(node.width / 2);
-        const radiusY = Math.abs(node.height / 2);
-        const ellipseProps = {
-            ...konvaProps,
-            x: node.x + radiusX,
-            y: node.y + radiusY,
-            radiusX: radiusX,
-        radiusY: radiusY,
-        ...fillProps,
-        };
-        return (
-            <Group key={node.id}>
-          {underFillPaints.map((paint) => {
-            const layerProps = getPaintFillProps(paint, effectiveFill);
-            return (
-              <Ellipse
-                key={`${node.id}-under-${paint.id}`}
-                x={node.x + radiusX}
-                y={node.y + radiusY}
-                radiusX={radiusX}
-                radiusY={radiusY}
-                rotation={node.rotation}
-                {...layerProps}
-                listening={false}
-                lineJoin="round"
-              />
-            );
-          })}
-                <Ellipse {...ellipseProps} lineJoin="round" />
-          {node.strokeWidth > 0 && (
-            <Ellipse
-              x={node.x + radiusX}
-              y={node.y + radiusY}
-              radiusX={radiusX}
-              radiusY={radiusY}
-              rotation={node.rotation}
-              fillEnabled={false}
-              stroke={strokeColor}
-              strokeWidth={node.strokeWidth}
-              opacity={strokeOpacity}
-              listening={false}
-              lineJoin="round"
-            />
-          )}
-          {backgroundBlurOverlayProps && (
-            <Ellipse
-              x={node.x + radiusX}
-              y={node.y + radiusY}
-              radiusX={radiusX}
-              radiusY={radiusY}
-              rotation={node.rotation}
-              {...backgroundBlurOverlayProps}
-              listening={false}
-            />
-          )}
-          {innerShadow && (
-            <Ellipse
-              x={node.x + radiusX}
-              y={node.y + radiusY}
-              radiusX={radiusX}
-              radiusY={radiusY}
-              rotation={node.rotation}
-              fill={innerShadowColor}
-              opacity={0.12}
-              shadowColor={innerShadowColor}
-              shadowBlur={innerShadowBlur}
-              shadowOffset={innerShadowOffset}
-              globalCompositeOperation="source-atop"
-              listening={false}
-            />
-          )}
-                {selectionProps && (
-                    <Ellipse 
-                        x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
-                        {...selectionProps}
-                    />
-                )}
-                {hoverProps && (
-                    <Ellipse 
-                        x={node.x + radiusX} y={node.y + radiusY} radiusX={radiusX} radiusY={radiusY}
-                        {...hoverProps}
-                    />
-                )}
-            </Group>
-        );
-    }
-    if (node.type === 'path') {
-        const pathComp = (
-            <Group key={node.id}>
-          {underFillPaints.map((paint) => (
-            <Path
-              key={`${node.id}-under-${paint.id}`}
-              x={node.x}
-              y={node.y}
-              rotation={node.rotation}
-              data={node.data}
-              {...getPaintFillProps(paint, effectiveFill)}
-              lineJoin="round"
-              listening={false}
-            />
-          ))}
-          <Path {...konvaProps} {...fillProps} data={node.data} lineJoin="round" />
-          {node.strokeWidth > 0 && (
-            <Path
-              x={node.x}
-              y={node.y}
-              rotation={node.rotation}
-              data={node.data}
-              fillEnabled={false}
-              stroke={strokeColor}
-              strokeWidth={node.strokeWidth}
-              opacity={strokeOpacity}
-              lineJoin="round"
-              listening={false}
-            />
-          )}
-          {backgroundBlurOverlayProps && (
-            <Path
-              x={node.x}
-              y={node.y}
-              rotation={node.rotation}
-              data={node.data}
-              {...backgroundBlurOverlayProps}
-              listening={false}
-            />
-          )}
-          {innerShadow && (
-            <Path
-              x={node.x}
-              y={node.y}
-              rotation={node.rotation}
-              data={node.data}
-              fill={innerShadowColor}
-              opacity={0.12}
-              shadowColor={innerShadowColor}
-              shadowBlur={innerShadowBlur}
-              shadowOffset={innerShadowOffset}
-              globalCompositeOperation="source-atop"
-              listening={false}
-            />
-          )}
-                {hoverProps && <Path data={node.data} rotation={node.rotation} {...hoverProps} x={node.x} y={node.y} />}
-            </Group>
-        );
-        if (tool === 'direct-select' && isSelected) {
-          const parsed = parsePathData(node.data);
-            const handles = [];
-          for (let idx = 0; idx < parsed.anchors.length; idx++) {
-            const anchor = parsed.anchors[idx];
-                const anchorX = node.x + anchor.x;
-                const anchorY = node.y + anchor.y;
-
-                if (anchor.cpIn) {
-                  handles.push(
-                    <Line
-                      key={`${node.id}-line-in-${idx}`}
-                      points={[anchorX, anchorY, node.x + anchor.cpIn.x, node.y + anchor.cpIn.y]}
-                      stroke="#6366F1"
-                      strokeWidth={1 / viewport.zoom}
-                      opacity={0.5}
-                      listening={false}
-                    />
-                  );
-                  handles.push(
-                    <Circle
-                      key={`${node.id}-cp-in-${idx}`}
-                      x={node.x + anchor.cpIn.x}
-                      y={node.y + anchor.cpIn.y}
-                      radius={3.5 / viewport.zoom}
-                      fill="#1D4ED8"
-                      stroke="#DBEAFE"
-                      strokeWidth={1 / viewport.zoom}
-                      draggable
-                      onMouseDown={(evt) => {
-                        evt.cancelBubble = true;
-                      }}
-                      onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'in', evt)}
-                      onDragEnd={() => pushHistory('path-edit')}
-                    />
-                  );
-                }
-
-                if (anchor.cpOut) {
-                  handles.push(
-                    <Line
-                      key={`${node.id}-line-out-${idx}`}
-                      points={[anchorX, anchorY, node.x + anchor.cpOut.x, node.y + anchor.cpOut.y]}
-                      stroke="#6366F1"
-                      strokeWidth={1 / viewport.zoom}
-                      opacity={0.5}
-                      listening={false}
-                    />
-                  );
-                  handles.push(
-                    <Circle
-                      key={`${node.id}-cp-out-${idx}`}
-                      x={node.x + anchor.cpOut.x}
-                      y={node.y + anchor.cpOut.y}
-                      radius={3.5 / viewport.zoom}
-                      fill="#1D4ED8"
-                      stroke="#DBEAFE"
-                      strokeWidth={1 / viewport.zoom}
-                      draggable
-                      onMouseDown={(evt) => {
-                        evt.cancelBubble = true;
-                      }}
-                      onDragMove={(evt) => handleControlPointDragMove(node.id, idx, 'out', evt)}
-                      onDragEnd={() => pushHistory('path-edit')}
-                    />
-                  );
-                }
-
-                handles.push(
-                    <Circle
-                        key={`${node.id}-point-${idx}`}
-                x={anchorX}
-                y={anchorY}
-                        radius={4 / viewport.zoom}
-                        fill={isPathAnchorSelected(node.id, idx) ? '#6366F1' : '#FFFFFF'}
-                        stroke="#6366F1"
-                        strokeWidth={1 / viewport.zoom}
-                        draggable
-                        onMouseDown={(evt) => {
-                          evt.cancelBubble = true;
-                          if (evt.evt.shiftKey) {
-                            const alreadySelected = isPathAnchorSelected(node.id, idx);
-                            const nextSelection = alreadySelected
-                              ? selectedPathAnchors.filter((anchor) => !(anchor.nodeId === node.id && anchor.index === idx))
-                              : [...selectedPathAnchors, { nodeId: node.id, index: idx }];
-                            setPathAnchorSelection(nextSelection);
-                            return;
-                          }
-
-                          if (!isPathAnchorSelected(node.id, idx) || selectedPathAnchors.length <= 1) {
-                            setPathAnchorSelection([{ nodeId: node.id, index: idx }]);
-                          } else {
-                            setSelectedPathAnchor({ nodeId: node.id, index: idx });
-                          }
-                        }}
-                        onDblClick={(evt) => {
-                          evt.cancelBubble = true;
-                          togglePathAnchorMode(node.id, idx);
-                        }}
-                        onDragMove={() => handlePointDragMove(node.id, idx)}
-                        onDragEnd={() => pushHistory('path-edit')}
-                    />
-                );
-            }
-            return (
-              <Group
-                key={node.id}
-                onDblClick={(evt) => {
-                  evt.cancelBubble = true;
-                  insertPathAnchorAtPointer(node.id);
-                }}
-              >
-                {pathComp}
-                {handles}
-              </Group>
-            );
-        }
-        return pathComp;
-    }
-    if (node.type === 'text') {
-      const lineHeight = node.lineHeight ? node.lineHeight / node.fontSize : 1.2;
-      const isVerticalWriting = node.writingMode === 'vertical-rl' || node.writingMode === 'vertical-lr';
-      const resolvedRotation = node.rotation || (isVerticalWriting ? 90 : 0);
-      const topTextPaintProps = getPaintFillProps(topFillPaint, effectiveFill);
-      const baseTextOpacity = Number.isFinite((topTextPaintProps as { opacity?: number }).opacity)
-        ? Number((topTextPaintProps as { opacity?: number }).opacity)
-        : effectiveOpacity;
-      const textBaseProps = {
-        text: effectiveText || node.text,
-        fontSize: node.fontSize,
-        fontFamily: node.fontFamily,
-        align: node.align,
-        verticalAlign: 'top' as const,
-        width: node.width,
-        height: node.height,
-        visible: editingId !== node.id,
-        lineHeight,
-        wrap: 'word' as const,
-        padding: 1,
-        lineJoin: 'round' as const,
-      };
-      return (
-        <Group key={node.id}>
-            {underFillPaints.map((paint) => {
-              const layerPaintProps = getPaintFillProps(paint, effectiveFill);
-              const layerOpacity = Number.isFinite((layerPaintProps as { opacity?: number }).opacity)
-                ? Number((layerPaintProps as { opacity?: number }).opacity)
-                : effectiveOpacity;
-              return (
-                <Text
-                  key={`${node.id}-under-${paint.id}`}
-                  x={node.x}
-                  y={node.y}
-                  rotation={resolvedRotation}
-                  {...textBaseProps}
-                  {...layerPaintProps}
-                  opacity={isVerticalWriting ? layerOpacity * 0.9 : layerOpacity}
-                  listening={false}
-                />
-              );
-            })}
-            <Text
-            {...konvaProps}
-            {...textBaseProps}
-            {...topTextPaintProps}
-            opacity={isVerticalWriting ? baseTextOpacity * 0.9 : baseTextOpacity}
-            rotation={resolvedRotation}
-            />
-            {selectionProps && (
-                <Rect 
-                    x={node.x} y={node.y} width={node.width} height={node.height}
-                    rotation={node.rotation}
-                    {...selectionProps}
-                />
-            )}
-            {hoverProps && (
-                <Rect 
-                    x={node.x} y={node.y} width={node.width} height={node.height}
-                    rotation={node.rotation}
-                    {...hoverProps}
-                />
-            )}
-        </Group>
-      );
-    }
-    return null;
-  };
-
-  // Recursive renderer for nodes with Mask support
-  const renderNodeHierarchy = (parentNodeId?: string) => {
-    const parentNodes = nodes.filter(n => n.parentId === parentNodeId);
-    if (parentNodes.length === 0) return null;
-
-    return buildMaskingRuns(parentNodes).map((run) => {
-      if (run.type === 'normal') {
-        return renderSingleNode(run.node);
-      }
-
-      const mask = run.mask;
-      const contents = [...run.maskedNodes];
-
-      return (
-        <Group key={`mask-group-${mask.id}`}>
-          {renderSingleNode(mask)}
-          <Group
-            clipFunc={(ctx) => {
-              ctx.beginPath();
-
-              ctx.save();
-              ctx.translate(mask.x + mask.width / 2, mask.y + mask.height / 2);
-              ctx.rotate((mask.rotation || 0) * Math.PI / 180);
-              ctx.translate(-mask.width / 2, -mask.height / 2);
-
-              if (mask.type === 'rect' || mask.type === 'frame' || mask.type === 'section' || mask.type === 'image') {
-                const r = getSanitizedCornerData(mask).corners;
-                const w = mask.width;
-                const h = mask.height;
-
-                ctx.moveTo(r.topLeft, 0);
-                ctx.lineTo(w - r.topRight, 0);
-                ctx.quadraticCurveTo(w, 0, w, r.topRight);
-                ctx.lineTo(w, h - r.bottomRight);
-                ctx.quadraticCurveTo(w, h, w - r.bottomRight, h);
-                ctx.lineTo(r.bottomLeft, h);
-                ctx.quadraticCurveTo(0, h, 0, h - r.bottomLeft);
-                ctx.lineTo(0, r.topLeft);
-                ctx.quadraticCurveTo(0, 0, r.topLeft, 0);
-              } else if (mask.type === 'circle') {
-                ctx.arc(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), 0, Math.PI * 2);
-              } else if (mask.type === 'ellipse') {
-                ctx.ellipse(mask.width / 2, mask.height / 2, Math.abs(mask.width / 2), Math.abs(mask.height / 2), 0, 0, Math.PI * 2);
-              } else if (mask.type === 'text') {
-                ctx.rect(0, 0, mask.width, mask.height);
-              } else if (mask.type === 'path') {
-                const parsed = parsePathData(mask.data || '');
-                if (parsed.anchors.length > 0) {
-                  ctx.moveTo(parsed.anchors[0].x, parsed.anchors[0].y);
-                  for (let index = 1; index < parsed.anchors.length; index += 1) {
-                    const prev = parsed.anchors[index - 1];
-                    const current = parsed.anchors[index];
-                    if (prev.cpOut || current.cpIn) {
-                      const c1 = prev.cpOut || { x: prev.x, y: prev.y };
-                      const c2 = current.cpIn || { x: current.x, y: current.y };
-                      ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, current.x, current.y);
-                    } else {
-                      ctx.lineTo(current.x, current.y);
-                    }
-                  }
-                  if (parsed.closed) ctx.closePath();
-                } else {
-                  ctx.rect(0, 0, Math.max(1, mask.width), Math.max(1, mask.height));
-                }
-              }
-
-              ctx.restore();
-            }}
-          >
-            {contents.map((node) => renderSingleNode(node))}
-          </Group>
-        </Group>
-      );
-    });
-  };
-
-  const renderDirectSelectHoverOutlines = () => {
-    if (tool !== 'direct-select' || directSelectHoverIds.length === 0) return null;
-
-    const cycleIds = directSelectCycleRef.current?.candidateIds || [];
-    const cycleMatchesHover = cycleIds.length === directSelectHoverIds.length && cycleIds.every((id, index) => id === directSelectHoverIds[index]);
-    const activeCycleId = cycleMatchesHover && directSelectCycleRef.current
-      ? directSelectHoverIds[directSelectCycleRef.current.index] || directSelectHoverIds[0]
-      : directSelectHoverIds[0];
-
-    return directSelectHoverIds
-      .map((id) => nodes.find((node) => node.id === id))
-      .filter((node): node is SceneNode => Boolean(node))
-      .map((node) => {
-        const global = getGlobalPosition(node.id);
-        const cornerData = getSanitizedCornerData(node);
-        const highlightColor = node.type === 'component' || node.type === 'instance' ? '#A855F7' : '#14B8A6';
-        const isActiveCycle = node.id === activeCycleId;
-        const strokeWidth = (isActiveCycle ? 2 : 1) / viewport.zoom;
-        const opacity = isActiveCycle ? 1 : 0.65;
-        const commonProps = {
-          key: `direct-select-hover-${node.id}`,
-          stroke: highlightColor,
-          strokeWidth,
-          opacity,
-          listening: false,
-          dash: isActiveCycle ? undefined : [4 / viewport.zoom, 3 / viewport.zoom],
-        };
-
-        if (node.type === 'circle') {
-          return (
-            <Circle
-              {...commonProps}
-              x={global.x + Math.abs(node.width / 2)}
-              y={global.y + Math.abs(node.width / 2)}
-              radius={Math.abs(node.width / 2)}
-              fillEnabled={false}
-            />
-          );
-        }
-
-        if (node.type === 'ellipse') {
-          return (
-            <Ellipse
-              {...commonProps}
-              x={global.x + Math.abs(node.width / 2)}
-              y={global.y + Math.abs(node.height / 2)}
-              radiusX={Math.abs(node.width / 2)}
-              radiusY={Math.abs(node.height / 2)}
-              fillEnabled={false}
-            />
-          );
-        }
-
-        if (node.type === 'path') {
-          return (
-            <Path
-              {...commonProps}
-              x={global.x}
-              y={global.y}
-              rotation={node.rotation}
-              data={node.data}
-              fillEnabled={false}
-            />
-          );
-        }
-
-        if (cornerData.smoothing > 0) {
-          return (
-            <Path
-              {...commonProps}
-              x={global.x}
-              y={global.y}
-              rotation={node.rotation}
-              data={getSuperellipsePath(node.width, node.height, cornerData.uniform, cornerData.smoothing)}
-              fillEnabled={false}
-            />
-          );
-        }
-
-        return (
-          <Rect
-            {...commonProps}
-            x={global.x}
-            y={global.y}
-            width={node.width}
-            height={node.height}
-            rotation={node.rotation}
-            cornerRadius={cornerData.cornerRadiusArray}
-            fillEnabled={false}
-          />
-        );
-      });
-  };
-
-  const renderPrototypeNoodles = () => {
-    if (mode !== 'prototype') return null;
-
-    return collectPrototypeConnections(nodes)
-      .map((connection) => {
-        const sourceRect = getGlobalRect(connection.sourceId);
-        const targetRect = getGlobalRect(connection.targetId);
-        if (!sourceRect || !targetRect) return null;
-
-        return {
-          connection,
-          points: buildPrototypeNoodlePoints(sourceRect, targetRect),
-        };
-      })
-      .filter((entry): entry is { connection: ReturnType<typeof collectPrototypeConnections>[number]; points: number[] } => Boolean(entry))
-      .map(({ connection, points }) => (
-        <Group key={`prototype-noodle-${connection.interactionId}-${connection.actionIndex}`} listening={false}>
-          <Arrow
-            points={points}
-            stroke="#F59E0B"
-            fill="#F59E0B"
-            strokeWidth={2 / viewport.zoom}
-            pointerLength={10 / viewport.zoom}
-            pointerWidth={9 / viewport.zoom}
-            tension={0.45}
-            opacity={0.9}
-            dash={connection.trigger === 'onHover' ? [8 / viewport.zoom, 6 / viewport.zoom] : undefined}
-          />
-          <Text
-            x={(points[2] + points[4]) / 2 - 28 / viewport.zoom}
-            y={(points[3] + points[5]) / 2 - 18 / viewport.zoom}
-            width={56 / viewport.zoom}
-            text={connection.trigger.replace('on', '')}
-            fontSize={10 / viewport.zoom}
-            align="center"
-            fill="#FCD34D"
-            listening={false}
-          />
-        </Group>
-      ));
-  };
-
-  const renderPrototypeDraft = () => {
-    if (mode !== 'prototype' || !prototypeConnectionDraft) return null;
-
-    const sourceRect = getGlobalRect(prototypeConnectionDraft.sourceId);
-    if (!sourceRect) return null;
-
-    const targetRect = prototypeConnectionDraft.targetId
-      ? getGlobalRect(prototypeConnectionDraft.targetId)
-      : { x: prototypeConnectionDraft.pointer.x, y: prototypeConnectionDraft.pointer.y, width: 1, height: 1 };
-    if (!targetRect) return null;
-
-    const points = buildPrototypeNoodlePoints(sourceRect, targetRect);
-
-    return (
-      <Group listening={false}>
-        <Arrow
-          points={points}
-          stroke="#FB7185"
-          fill="#FB7185"
-          strokeWidth={2 / viewport.zoom}
-          pointerLength={10 / viewport.zoom}
-          pointerWidth={9 / viewport.zoom}
-          tension={0.45}
-          dash={[10 / viewport.zoom, 6 / viewport.zoom]}
-        />
-        {prototypeConnectionDraft.targetId && (() => {
-          const hoveredRect = getGlobalRect(prototypeConnectionDraft.targetId!);
-          if (!hoveredRect) return null;
-          return (
-            <Rect
-              x={hoveredRect.x}
-              y={hoveredRect.y}
-              width={hoveredRect.width}
-              height={hoveredRect.height}
-              stroke="#FB7185"
-              strokeWidth={2 / viewport.zoom}
-              dash={[8 / viewport.zoom, 4 / viewport.zoom]}
-              fillEnabled={false}
-            />
-          );
-        })()}
-      </Group>
-    );
-  };
-
-  const renderPrototypeHandles = () => {
-    if (mode !== 'prototype' || prototypeConnectionDraft) return null;
-
-    return filterTopLevelSelection(selectedIds)
-      .map((id) => nodes.find((node) => node.id === id))
-      .filter((node): node is SceneNode => Boolean(node) && isPrototypeTargetNode(node!))
-      .map((node) => {
-        const rect = getGlobalRect(node.id);
-        if (!rect) return null;
-
-        return (
-          <Group key={`prototype-handle-${node.id}`}>
-            <Circle
-              x={rect.x + rect.width + 18 / viewport.zoom}
-              y={rect.y + rect.height / 2}
-              radius={10 / viewport.zoom}
-              fill="#111827"
-              stroke="#F59E0B"
-              strokeWidth={2 / viewport.zoom}
-              onMouseDown={(event) => {
-                event.cancelBubble = true;
-                setPrototypeConnectionDraft({
-                  sourceId: node.id,
-                  pointer: getPointerPosition(),
-                  targetId: null,
-                });
-              }}
-            />
-            <Arrow
-              points={[
-                rect.x + rect.width - 6 / viewport.zoom,
-                rect.y + rect.height / 2,
-                rect.x + rect.width + 10 / viewport.zoom,
-                rect.y + rect.height / 2,
-              ]}
-              stroke="#F59E0B"
-              fill="#F59E0B"
-              strokeWidth={2 / viewport.zoom}
-              pointerLength={8 / viewport.zoom}
-              pointerWidth={7 / viewport.zoom}
-              listening={false}
-            />
-          </Group>
-        );
-      });
-  };
-
   return (
     <div
       id="canvas-container"
@@ -3249,294 +2288,127 @@ export const Canvas = ({
         ref={containerRef}
         className="absolute top-5 left-5 right-0 bottom-0 overflow-hidden"
       >
-        <Stage
+        {isPureRendererMode ? (
+          <>
+            <canvas
+              ref={pureCanvasRef}
+              width={Math.max(1, dimensions.width)}
+              height={Math.max(1, dimensions.height)}
+              className="absolute inset-0 touch-none"
+              onPointerDown={handlePureCanvasPointerDown}
+              onPointerMove={handlePureCanvasPointerMove}
+              onPointerUp={handlePureCanvasPointerUp}
+              onPointerLeave={handlePureCanvasPointerLeave}
+              onContextMenu={handlePureCanvasContextMenu}
+              onWheel={handlePureCanvasWheel}
+              onDoubleClick={() => tool === 'pen' && finalizePenPath()}
+              style={{ width: '100%', height: '100%' }}
+            />
+            {selectionRect && (
+              <div
+                className="pointer-events-none absolute border border-dashed border-[#6366F1] bg-[rgba(99,102,241,0.1)]"
+                style={{
+                  left: (Math.min(selectionRect.x, selectionRect.x + selectionRect.width) * viewport.zoom) + viewport.x,
+                  top: (Math.min(selectionRect.y, selectionRect.y + selectionRect.height) * viewport.zoom) + viewport.y,
+                  width: Math.abs(selectionRect.width) * viewport.zoom,
+                  height: Math.abs(selectionRect.height) * viewport.zoom,
+                }}
+              />
+            )}
+            {zoomRect && (
+              <div
+                className="pointer-events-none absolute border border-dashed border-[#10B981] bg-[rgba(16,185,129,0.12)]"
+                style={{
+                  left: (Math.min(zoomRect.x, zoomRect.x + zoomRect.width) * viewport.zoom) + viewport.x,
+                  top: (Math.min(zoomRect.y, zoomRect.y + zoomRect.height) * viewport.zoom) + viewport.y,
+                  width: Math.abs(zoomRect.width) * viewport.zoom,
+                  height: Math.abs(zoomRect.height) * viewport.zoom,
+                }}
+              />
+            )}
+          </>
+        ) : (
+          <React.Suspense fallback={null}>
+            <LazyKonvaSceneTree
+              dimensions={dimensions}
+              viewport={viewport}
+              stageRef={stageRef}
+              transformerRef={transformerRef}
+              tool={tool}
+              mode={mode}
+              altHeld={altHeld}
+              selectedIds={selectedIds}
+              hoveredId={hoveredId}
+              nodes={nodes}
+              variables={variables}
+              selectedPathAnchors={selectedPathAnchors}
+              directSelectHoverIds={directSelectHoverIds}
+              autoLayoutDropPreview={autoLayoutDropPreview}
+              prototypeConnectionDraft={prototypeConnectionDraft}
+              useWorkerSpatialRuntime={useWorkerSpatialRuntime}
+              isPanning={isPanning}
+              editingId={editingId}
+              newNode={newNode}
+              penPoints={penPoints}
+              directSelectCycleRef={directSelectCycleRef}
+              getGlobalPosition={getGlobalPosition}
+              getGlobalRect={getGlobalRect}
+              filterTopLevelSelection={filterTopLevelSelection}
+              setPrototypeConnectionDraft={setPrototypeConnectionDraft}
+              runNodeInteractions={runNodeInteractions}
+              getPointerPosition={getPointerPosition}
+              setSelectedIds={setSelectedIds}
+              clearPathAnchorSelection={clearPathAnchorSelection}
+              setHoveredNode={setHoveredNode}
+              handleTextDblClick={handleTextDblClick}
+              handleNodeDragMove={handleNodeDragMove}
+              handleNodeDragStart={handleNodeDragStart}
+              handleNodeUpdate={handleNodeUpdate}
+              setPathAnchorSelection={setPathAnchorSelection}
+              setSelectedPathAnchor={setSelectedPathAnchor}
+              isPathAnchorSelected={isPathAnchorSelected}
+              togglePathAnchorMode={togglePathAnchorMode}
+              handleControlPointDragMove={handleControlPointDragMove}
+              pushHistory={pushHistory}
+              handlePointDragMove={handlePointDragMove}
+              insertPathAnchorAtPointer={insertPathAnchorAtPointer}
+              clampSize={clampSize}
+              resolveDirectSelectCycle={resolveDirectSelectCycle}
+              selectionRect={selectionRect}
+              zoomRect={zoomRect}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onWheel={handleWheel}
+              onContextMenu={handleCanvasContextMenu}
+              onMouseLeave={() => {
+                setDirectSelectHoverIds([]);
+                setAutoLayoutDropPreview(null);
+              }}
+              onDoubleClick={() => {
+                if (tool === 'pen') {
+                  finalizePenPath();
+                }
+              }}
+            />
+          </React.Suspense>
+        )}
+
+        <GuidesOverlay
+          nodes={nodes}
+          viewport={viewport}
           width={dimensions.width}
           height={dimensions.height}
-          ref={stageRef}
-          scaleX={viewport.zoom}
-          scaleY={viewport.zoom}
-          x={viewport.x}
-          y={viewport.y}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onWheel={handleWheel}
-          onContextMenu={handleCanvasContextMenu}
-          onMouseLeave={() => {
-            setDirectSelectHoverIds([]);
-            setAutoLayoutDropPreview(null);
-          }}
-          onDblClick={(e) => tool === 'pen' && finalizePenPath()}
-          draggable={false}
-        >
-          <Layer>
-            {renderPrototypeNoodles()}
-            {renderNodeHierarchy()}
-            {renderPrototypeDraft()}
-            {renderPrototypeHandles()}
-            {renderDirectSelectHoverOutlines()}
-            {renderAutoLayoutDropPreview()}
-
-            {/* Creation Preview */}
-            {newNode && (
-              <Group 
-                x={newNode.parentId ? getGlobalPosition(newNode.parentId).x : 0} 
-                y={newNode.parentId ? getGlobalPosition(newNode.parentId).y : 0}
-              >
-                {(newNode.type === 'rect' || newNode.type === 'frame' || newNode.type === 'section') && (
-                  <Rect x={newNode.x} y={newNode.y} width={newNode.width} height={newNode.height} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
-                )}
-                {newNode.type === 'circle' && (
-                  <Circle
-                    x={newNode.x + newNode.width / 2}
-                    y={newNode.y + newNode.width / 2}
-                    radius={Math.abs(newNode.width / 2)}
-                    fill="#6366F1"
-                    opacity={0.2}
-                    stroke="#6366F1"
-                    strokeWidth={1}
-                    lineJoin="round"
-                  />
-                )}
-                {newNode.type === 'image' && (
-                  <Rect x={newNode.x} y={newNode.y} width={newNode.width} height={newNode.height} fill="#6366F1" opacity={0.2} stroke="#6366F1" strokeWidth={1} lineJoin="round" />
-                )}
-                {newNode.type === 'ellipse' && (
-                  <Ellipse
-                    x={newNode.x + newNode.width / 2}
-                    y={newNode.y + newNode.height / 2}
-                    radiusX={Math.abs(newNode.width / 2)}
-                    radiusY={Math.abs(newNode.height / 2)}
-                    fill="#6366F1"
-                    opacity={0.2}
-                    stroke="#6366F1"
-                    strokeWidth={1}
-                    lineJoin="round"
-                  />
-                )}
-                {newNode.type === 'text' && (
-                  <Group>
-                      <Rect 
-                          x={newNode.width < 0 ? newNode.x + newNode.width : newNode.x} 
-                          y={newNode.height < 0 ? newNode.y + newNode.height : newNode.y} 
-                          width={Math.abs(newNode.width)} 
-                          height={Math.abs(newNode.height)} 
-                          stroke="#6366F1" 
-                          strokeWidth={1 / viewport.zoom} 
-                          dash={[4, 2]} 
-                      />
-                      <Text 
-                          x={newNode.width < 0 ? newNode.x + newNode.width : newNode.x} 
-                          y={newNode.height < 0 ? newNode.y + newNode.height : newNode.y}
-                          text={newNode.text}
-                          fontSize={newNode.fontSize}
-                          fontFamily={newNode.fontFamily}
-                          fill="#6366F1"
-                          opacity={0.5}
-                          width={Math.abs(newNode.width)}
-                          height={Math.abs(newNode.height)}
-                          wrap="word"
-                          lineJoin="round"
-                      />
-                  </Group>
-                )}
-              </Group>
-            )}
-
-            {/* Pen Tool Preview */}
-            {penPoints.length > 0 && (
-              <Line
-                  points={penPoints.flatMap(p => [p.x, p.y])}
-                  stroke="#6366F1"
-                  strokeWidth={2 / viewport.zoom}
-                  lineCap="round"
-                  lineJoin="round"
-              />
-            )}
-            {/* Live Pen Drawing */}
-            {penPoints.length > 0 && (
-                <Group>
-                    <Path 
-                        data={`M ${penPoints[0].x} ${penPoints[0].y} ` + penPoints.slice(1).map((p, i) => {
-                            const prev = penPoints[i];
-                            if (prev.cp2 && p.cp1) {
-                                return `C ${prev.cp2.x} ${prev.cp2.y}, ${p.cp1.x} ${p.cp1.y}, ${p.x} ${p.y}`;
-                            }
-                            return `L ${p.x} ${p.y}`;
-                        }).join(' ')}
-                        stroke="#6366F1"
-                        strokeWidth={2 / viewport.zoom}
-                    />
-                    {penPoints.map((p, i) => (
-                        <Group key={i}>
-                            <Circle x={p.x} y={p.y} radius={4 / viewport.zoom} fill="white" stroke="#6366F1" strokeWidth={1 / viewport.zoom} />
-                            {p.cp1 && p.cp1.x !== p.x && (
-                                <>
-                                    <Line points={[p.x, p.y, p.cp1.x, p.cp1.y]} stroke="#6366F1" strokeWidth={1 / viewport.zoom} opacity={0.3} />
-                                    <Circle x={p.cp1.x} y={p.cp1.y} radius={3 / viewport.zoom} fill="#6366F1" opacity={0.5} />
-                                </>
-                            )}
-                            {p.cp2 && p.cp2.x !== p.x && (
-                                <>
-                                    <Line points={[p.x, p.y, p.cp2.x, p.cp2.y]} stroke="#6366F1" strokeWidth={1 / viewport.zoom} opacity={0.3} />
-                                    <Circle x={p.cp2.x} y={p.cp2.y} radius={3 / viewport.zoom} fill="#6366F1" opacity={0.5} />
-                                </>
-                            )}
-                        </Group>
-                    ))}
-                    {/* Dash to mouse cursor */}
-                    {(() => {
-                        const { x, y } = getPointerPosition();
-                        return (
-                          <Line
-                              points={[penPoints[penPoints.length - 1].x, penPoints[penPoints.length - 1].y, x, y]}
-                              stroke="#6366F1"
-                              strokeWidth={1 / viewport.zoom}
-                              dash={[5, 5]}
-                          />
-                        );
-                    })()}
-                </Group>
-            )}
-
-            {/* Marquee Preview */}
-            {selectionRect && (
-              <Rect 
-                x={selectionRect.x} y={selectionRect.y} 
-                width={selectionRect.width} height={selectionRect.height} 
-                fill="rgba(99, 102, 241, 0.1)" stroke="#6366F1" strokeWidth={1 / viewport.zoom} 
-                dash={[5, 5]}
-              />
-            )}
-
-            {zoomRect && (
-              <Rect
-                x={zoomRect.x}
-                y={zoomRect.y}
-                width={zoomRect.width}
-                height={zoomRect.height}
-                fill="rgba(16, 185, 129, 0.12)"
-                stroke="#10B981"
-                strokeWidth={1 / viewport.zoom}
-                dash={[6, 4]}
-              />
-            )}
-
-            {/* Selection Transformer */}
-            {(tool === 'select' || tool === 'scale') && (
-              <Transformer
-                ref={transformerRef}
-                keepRatio={tool === 'scale'}
-                centeredScaling={altHeld}
-                rotateEnabled={tool !== 'scale'}
-                enabledAnchors={tool === 'scale' ? ['top-left', 'top-right', 'bottom-left', 'bottom-right'] : undefined}
-                shiftBehavior="inverted"
-                boundBoxFunc={(oldBox, newBox) => {
-                  if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) return oldBox;
-                  return newBox;
-                }}
-                anchorStroke="#6366F1" anchorFill="#FFFFFF" anchorSize={6} borderStroke="#6366F1" borderDash={[1, 1]}
-              />
-            )}
-
-            {/* Persistent Guides */}
-            {persistentGuides.map((g) => (
-              <Line
-                  key={`persistent-guide-${g.id}`}
-                  points={g.type === 'vertical'
-                      ? [g.position, -10000, g.position, 10000]
-                      : [-10000, g.position, 10000, g.position]}
-                  stroke="#3B82F6"
-                  strokeWidth={1 / viewport.zoom}
-                  draggable
-                  hitStrokeWidth={10 / viewport.zoom}
-                  onDragMove={(e) => {
-                    const guideNode = e.target;
-                    const nextPos = g.type === 'vertical'
-                      ? g.position + guideNode.x()
-                      : g.position + guideNode.y();
-                    updateGuide(g.id, nextPos);
-                    guideNode.x(0);
-                    guideNode.y(0);
-                  }}
-                  onDragEnd={() => pushHistory()}
-                  onDblClick={(e) => {
-                    e.cancelBubble = true;
-                    removeGuide(g.id);
-                    pushHistory();
-                  }}
-              />
-            ))}
-
-            {/* Smart Guides */}
-            {snapLines.map((g, i) => (
-              <Line
-                  key={`guide-${i}`}
-                  points={g.x !== undefined 
-                      ? [g.x, -10000, g.x, 10000] 
-                      : [-10000, g.y!, 10000, g.y!]}
-                  stroke="#FF4D4D"
-                  strokeWidth={1 / viewport.zoom}
-                  dash={[2, 2]}
-              />
-            ))}
-
-            {/* Redlines (Measurement) */}
-            {altHeld && selectedIds.length > 0 && hoveredId && selectedIds[0] !== hoveredId && (() => {
-                const from = nodes.find(n => n.id === selectedIds[0]);
-                const to = nodes.find(n => n.id === hoveredId);
-                if (!from || !to) return null;
-
-                const fromPos = getGlobalPosition(from.id);
-                const toPos = getGlobalPosition(to.id);
-
-                const fromRect = { x: fromPos.x, y: fromPos.y, width: from.width, height: from.height };
-                const toRect = { x: toPos.x, y: toPos.y, width: to.width, height: to.height };
-
-                // Simple vertical distance
-                const dists = [];
-                
-                // Helper to draw line + text
-                const drawLine = (p1: [number, number], p2: [number, number], label: string) => (
-                    <Group key={`${p1}-${p2}`}>
-                        <Line points={[...p1, ...p2]} stroke="#FF4D4D" strokeWidth={1/viewport.zoom} />
-                        <Group x={(p1[0] + p2[0]) / 2} y={(p1[1] + p2[1]) / 2}>
-                          <Rect 
-                              x={-10/viewport.zoom} y={-7/viewport.zoom} 
-                              width={20/viewport.zoom} height={14/viewport.zoom} 
-                              fill="#FF4D4D" cornerRadius={2/viewport.zoom} 
-                          />
-                          <Text 
-                              x={-10/viewport.zoom} y={-5/viewport.zoom}
-                              width={20/viewport.zoom}
-                              text={label} fontSize={10/viewport.zoom} fill="white" align="center" 
-                          />
-                        </Group>
-                    </Group>
-                );
-
-                // 1. TOP to TOP
-                if (toRect.y + toRect.height < fromRect.y) {
-                    const dist = Math.round(fromRect.y - (toRect.y + toRect.height));
-                    dists.push(drawLine([fromRect.x + fromRect.width/2, toRect.y + toRect.height], [fromRect.x + fromRect.width/2, fromRect.y], dist.toString()));
-                } else if (toRect.y > fromRect.y + fromRect.height) {
-                    const dist = Math.round(toRect.y - (fromRect.y + fromRect.height));
-                     dists.push(drawLine([fromRect.x + fromRect.width/2, fromRect.y + fromRect.height], [fromRect.x + fromRect.width/2, toRect.y], dist.toString()));
-                }
-
-                // 2. LEFT to LEFT
-                if (toRect.x + toRect.width < fromRect.x) {
-                  const dist = Math.round(fromRect.x - (toRect.x + toRect.width));
-                  dists.push(drawLine([toRect.x + toRect.width, fromRect.y + fromRect.height/2], [fromRect.x, fromRect.y + fromRect.height/2], dist.toString()));
-                } else if (toRect.x > fromRect.x + fromRect.width) {
-                    const dist = Math.round(toRect.x - (fromRect.x + fromRect.width));
-                    dists.push(drawLine([fromRect.x + fromRect.width, fromRect.y + fromRect.height/2], [toRect.x, fromRect.y + fromRect.height/2], dist.toString()));
-                }
-
-                return dists;
-            })()}
-          </Layer>
-        </Stage>
+          mode={mode}
+          persistentGuides={persistentGuides}
+          snapLines={snapLines}
+          prototypeConnectionDraft={prototypeConnectionDraft}
+          getGlobalPosition={getGlobalPosition}
+        />
+        <TransformOverlay
+          enabled={isPureRendererMode}
+          getGlobalPosition={getGlobalPosition}
+        />
       </div>
 
       {contextMenu && (

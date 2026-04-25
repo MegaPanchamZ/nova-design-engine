@@ -1,4 +1,6 @@
-export type RenderBackendKind = 'react-konva' | 'canvaskit' | 'pixi-webgl' | 'webgpu';
+import type { SceneNode } from '../../types';
+
+export type RenderBackendKind = 'react-konva' | 'canvas' | 'skia' | 'canvaskit' | 'pixi-webgl' | 'webgpu';
 
 export interface RenderBounds {
   x: number;
@@ -20,10 +22,27 @@ export interface RenderMaskLayer {
   clipPathId?: string;
 }
 
+export interface RenderSceneNode {
+  id: string;
+  node: SceneNode;
+  globalX: number;
+  globalY: number;
+}
+
+export interface RenderCamera {
+  x: number;
+  y: number;
+  zoom: number;
+  pixelRatio: number;
+}
+
 export interface RendererFrameInput {
   viewport: RenderBounds;
   dirtyRegions: RenderBounds[];
   nodeIds: string[];
+  sceneNodes?: RenderSceneNode[];
+  camera?: RenderCamera;
+  canvasSize?: { width: number; height: number };
 }
 
 export interface RenderStats {

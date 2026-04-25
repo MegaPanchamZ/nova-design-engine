@@ -86,7 +86,14 @@ export { TransactionalCommandBus } from './engine/state/commandBus';
 export { computeSnap } from './engine/snapping/snapEngine';
 
 /** Boolean engine wrapper with WASM adapter hooks and deterministic fallback. */
-export { DeterministicBooleanEngine, createFallbackBooleanAdapter, createClipperWasmAdapter } from './engine/geometry/booleanWasm';
+export {
+  DeterministicBooleanEngine,
+  combineBooleanPaths,
+  createFallbackBooleanAdapter,
+  createClipperWasmAdapter,
+  ensureBooleanWasmReady,
+  getBooleanWasmAdapter,
+} from './engine/geometry/booleanWasm';
 
 /** Rich text model helpers and delta application utilities. */
 export { createRichTextDocument, applyDelta, toPlainText } from './engine/text/richText';
@@ -129,9 +136,11 @@ export type {
 export type {
   RenderBackendKind,
   RenderBounds,
+  RenderCamera,
   RendererAdapter,
   RendererFrameInput,
   RenderMaskLayer,
+  RenderSceneNode,
   RenderStats,
   RenderTile,
 } from './engine/render/types';

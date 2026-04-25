@@ -202,6 +202,54 @@ export interface SpatialSnapResult {
   snapLines: SnapLine[];
 }
 
+export interface SpatialCandidateSnapInput {
+  nodeId: string;
+  globalX: number;
+  globalY: number;
+  width: number;
+  height: number;
+  snapThreshold: number;
+  persistentGuides: Guide[];
+  candidates: SpatialBounds[];
+}
+
+export const snapNodeToSpatialCandidates = ({
+  nodeId,
+  globalX,
+  globalY,
+  width,
+  height,
+  snapThreshold,
+  persistentGuides,
+  candidates,
+}: SpatialCandidateSnapInput): SpatialSnapResult => {
+  const moving = {
+    id: nodeId,
+    minX: globalX,
+    minY: globalY,
+    maxX: globalX + width,
+    maxY: globalY + height,
+  };
+
+  const base = candidates.length > 0
+    ? computeSnap({
+        movingId: nodeId,
+        bounds: moving,
+        candidates,
+        threshold: snapThreshold,
+      })
+    : { x: globalX, y: globalY, guides: [] as SnapGuide[] };
+
+  const guideSnap = applyPersistentGuideSnap(base.x, base.y, width, height, persistentGuides, snapThreshold);
+  const lines = toSnapLines([...base.guides, ...guideSnap.guides], snapThreshold);
+
+  return {
+    x: guideSnap.x,
+    y: guideSnap.y,
+    snapLines: lines,
+  };
+};
+
 export const snapNodeToSpatial = ({
   state,
   nodeId,
