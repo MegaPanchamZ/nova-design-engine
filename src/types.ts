@@ -311,8 +311,6 @@ export interface DesignState {
   hoveredId: string | null;
   viewport: Viewport;
   tool: ToolType;
-  history: Page[][]; 
-  historyIndex: number;
   mode: 'design' | 'prototype' | 'inspect';
   showRulers: boolean;
   guides: Guide[];

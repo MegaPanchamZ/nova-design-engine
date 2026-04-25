@@ -1,0 +1,84 @@
+---
+title: Runtime Backends
+description: Configure renderer and spatial runtime backends in Nova React hosts.
+---
+
+# Runtime Backends
+
+Nova React hosts expose backend switches so you can control rendering and spatial-query execution in production.
+
+## Renderer Backend
+
+Use `canvasRendererBackend` to select the render adapter:
+
+- `react-konva` (default)
+- `pixi-webgl`
+- `canvaskit`
+- `webgpu` (fallback path today)
+
+## Spatial Runtime
+
+Use `spatialRuntimeMode` to select query execution:
+
+- `main-thread` (default): spatial index runs in the UI thread.
+- `worker`: hit-testing and rectangle queries run in the spatial Web Worker.
+
+You can also disable the spatial bridge entirely with `enableSpatialRuntime={false}`.
+
+## NovaEditorShell Example
+
+```tsx
+import { NovaEditorShell } from 'nova-design-engine/react';
+
+export function App() {
+  return (
+    <NovaEditorShell
+      canvasRendererBackend="pixi-webgl"
+      spatialRuntimeMode="worker"
+      enableSpatialRuntime={true}
+    />
+  );
+}
+```
+
+## NovaEditorComposer Example
+
+```tsx
+import { NovaEditorComposer } from 'nova-design-engine/react';
+
+export function ComposerSurface() {
+  return (
+    <NovaEditorComposer
+      canvasRendererBackend="canvaskit"
+      spatialRuntimeMode="main-thread"
+      showAssistant={false}
+      leftPanelWidth={300}
+      rightPanelWidth={360}
+    />
+  );
+}
+```
+
+## Viewer Example
+
+```tsx
+import { Viewer } from 'nova-design-engine/react';
+
+export function PrototypeViewer() {
+  return (
+    <Viewer
+      canvasRendererBackend="react-konva"
+      spatialRuntimeMode="worker"
+    />
+  );
+}
+```
+
+## Runtime Notes
+
+- Worker mode currently offloads hit-testing and rectangle selection queries.
+- Main-thread mode keeps all spatial lookups local and synchronous.
+- The container emits runtime metadata attributes for debugging:
+  - `data-renderer-backend`
+  - `data-spatial-runtime-mode`
+  - `data-spatial-runtime-enabled`

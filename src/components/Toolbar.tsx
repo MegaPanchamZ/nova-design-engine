@@ -46,7 +46,7 @@ const TOOL_ICONS: Record<ToolType, LucideIcon> = {
 };
 
 export const Toolbar = () => {
-  const { pages, currentPageId, tool, setTool, undo, redo, historyIndex, history } = useStore();
+  const { pages, currentPageId, tool, setTool, undo, redo, canUndo, canRedo } = useStore();
   const dockRef = useRef<HTMLDivElement | null>(null);
   const [openGroup, setOpenGroup] = useState<ToolGroupId | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -140,7 +140,7 @@ export const Toolbar = () => {
           <button
             id="undo-btn"
             onClick={undo}
-            disabled={historyIndex === 0}
+            disabled={!canUndo()}
             title="Undo (Ctrl+Z)"
             className="h-8 w-8 rounded-lg border border-transparent text-[#A1A1A1] transition-colors hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white disabled:opacity-20"
           >
@@ -149,7 +149,7 @@ export const Toolbar = () => {
           <button
             id="redo-btn"
             onClick={redo}
-            disabled={historyIndex >= history.length - 1}
+            disabled={!canRedo()}
             title="Redo (Ctrl+Shift+Z)"
             className="h-8 w-8 rounded-lg border border-transparent text-[#A1A1A1] transition-colors hover:border-[#2F2F2F] hover:bg-[#1E1E1E] hover:text-white disabled:opacity-20"
           >

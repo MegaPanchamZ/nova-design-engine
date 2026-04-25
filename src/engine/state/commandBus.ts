@@ -44,6 +44,14 @@ export class TransactionalCommandBus<TState, TCommand extends Command = Command>
     return [...this.eventLog];
   }
 
+  canUndo(): boolean {
+    return this.undoGroups.length > 0;
+  }
+
+  canRedo(): boolean {
+    return this.redoGroups.length > 0;
+  }
+
   commit(command: TCommand): { dirtyKeys: string[]; events: EventEnvelope[] } {
     const result = this.reducer(this.state, command);
     this.state = result.nextState;
@@ -53,8 +61,8 @@ export class TransactionalCommandBus<TState, TCommand extends Command = Command>
     this.redoGroups = [];
 
     const groupId = command.groupId || command.id;
-    const activeGroup = this.undoGroups.find((group) => group.id === groupId);
-    if (activeGroup) {
+    const activeGroup = this.undoGroups[this.undoGroups.length - 1];
+    if (activeGroup && activeGroup.id === groupId) {
       activeGroup.commandIds.push(command.id);
     } else {
       this.undoGroups.push({ id: groupId, commandIds: [command.id] });

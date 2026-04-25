@@ -10,6 +10,7 @@ export interface ViewerProps extends NovaTheme {
   style?: CSSProperties;
   canvasRendererBackend?: RenderBackendKind;
   enableSpatialRuntime?: boolean;
+  spatialRuntimeMode?: 'main-thread' | 'worker';
 }
 
 export const Viewer = ({
@@ -18,6 +19,7 @@ export const Viewer = ({
   mode,
   canvasRendererBackend = 'react-konva',
   enableSpatialRuntime = true,
+  spatialRuntimeMode = 'main-thread',
   accentColor,
   panelBackgroundColor,
   borderColor,
@@ -50,7 +52,11 @@ export const Viewer = ({
         ...style,
       }}
     >
-      <Canvas rendererBackend={canvasRendererBackend} enableSpatialRuntime={enableSpatialRuntime} />
+      <Canvas
+        rendererBackend={canvasRendererBackend}
+        enableSpatialRuntime={enableSpatialRuntime}
+        spatialRuntimeMode={spatialRuntimeMode}
+      />
     </NovaThemeProvider>
   );
 };

@@ -1,10 +1,17 @@
 import { create } from 'zustand';
 import { AITweak, DesignState, SceneNode, ToolType, Viewport, createDefaultNode, FrameNode, Page, Variable, Style, TextNode, SnapLine, Paint } from './types';
-import { calculateLayout } from './lib/layoutUtils';
+import {
+    applyFrameSizingWithoutAutoLayout as applyFrameSizingWithoutAutoLayoutEngine,
+    calculateLayout,
+    reflowFrameBranch as reflowFrameBranchEngine,
+    reflowNodeBranch as reflowNodeBranchEngine,
+    reflowNodeBranches as reflowNodeBranchesEngine,
+} from './engine/layout';
 import { measureText } from './lib/measureText';
 import { v4 as uuidv4 } from 'uuid';
 import { generateUI, generateImage } from './services/novaAIService';
 import { parseHTMLToNodes } from './lib/htmlParser';
+import { Command, TransactionalCommandBus, TransactionalReducer } from './engine/state/commandBus';
 
 interface ClipboardSnapshot {
     nodes: SceneNode[];
@@ -17,8 +24,6 @@ let clipboardSnapshot: ClipboardSnapshot | null = null;
 let pasteNudgeCount = 0;
 const MAX_CANVAS_COORD = 1_000_000;
 const MAX_CANVAS_SIZE = 1_000_000;
-const HISTORY_LIMIT = 50;
-const HISTORY_MERGE_WINDOW_MS = 600;
 const INSTANCE_OVERRIDE_EXCLUDED_KEYS = new Set([
     'id',
     'type',
@@ -31,11 +36,50 @@ const INSTANCE_OVERRIDE_EXCLUDED_KEYS = new Set([
 
 const deepClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-let lastHistoryCommit: { source: string; timestamp: number } | null = null;
+type StoreCommandPayload = Record<string, unknown>;
+type StoreCommand = Command<StoreCommandPayload>;
+type StoreDocumentSnapshot = Pick<DesignState, 'pages' | 'currentPageId' | 'selectedIds' | 'variables' | 'styles'>;
 
-const resetHistoryCommit = () => {
-    lastHistoryCommit = null;
+const storeCommandIndex = new Map<string, StoreCommand>();
+
+interface StoreCommandState {
+    revision: number;
+}
+
+const storeCommandReducer: TransactionalReducer<StoreCommandState, StoreCommand> = (state, command) => {
+    const nextRevision = state.revision + 1;
+    return {
+        nextState: { revision: nextRevision },
+        dirtyKeys: ['revision'],
+        events: [{
+            id: `${command.id}:event`,
+            commandId: command.id,
+            type: command.type,
+            payload: command.payload,
+            timestamp: command.timestamp,
+        }],
+    };
 };
+
+const storeCommandBus = new TransactionalCommandBus<StoreCommandState, StoreCommand>(
+    { revision: 0 },
+    storeCommandReducer,
+);
+
+const recordStoreCommand = (type: string, payload: StoreCommandPayload, groupId?: string) => {
+    const command = {
+        id: `${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        type,
+        payload,
+        timestamp: Date.now(),
+        groupId,
+    };
+    storeCommandIndex.set(command.id, command);
+    storeCommandBus.commit(command);
+    return command;
+};
+
+const nextCommandGroupId = (scope = 'document') => `${scope}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
 const cloneValue = <T,>(value: T): T => {
     if (typeof structuredClone === 'function') return structuredClone(value);
@@ -67,6 +111,88 @@ const areValuesEqual = (left: unknown, right: unknown): boolean => {
     }
 
     return false;
+};
+
+const captureDocumentSnapshot = (
+    state: Pick<DesignState, 'pages' | 'currentPageId' | 'selectedIds' | 'variables' | 'styles'>
+): StoreDocumentSnapshot => ({
+    pages: cloneValue(state.pages),
+    currentPageId: state.currentPageId,
+    selectedIds: cloneValue(state.selectedIds),
+    variables: cloneValue(state.variables),
+    styles: cloneValue(state.styles),
+});
+
+const isStoreDocumentSnapshot = (value: unknown): value is StoreDocumentSnapshot => {
+    if (!isRecord(value)) return false;
+    return Array.isArray(value.pages) &&
+        typeof value.currentPageId === 'string' &&
+        Array.isArray(value.selectedIds) &&
+        Array.isArray(value.variables) &&
+        Array.isArray(value.styles);
+};
+
+const buildDocumentSnapshotFromResult = (
+    state: Pick<DesignState, 'pages' | 'currentPageId' | 'selectedIds' | 'variables' | 'styles'>,
+    result: Partial<DesignState>
+): StoreDocumentSnapshot => ({
+    pages: cloneValue(result.pages ?? state.pages),
+    currentPageId: result.currentPageId ?? state.currentPageId,
+    selectedIds: cloneValue(result.selectedIds ?? state.selectedIds),
+    variables: cloneValue(result.variables ?? state.variables),
+    styles: cloneValue(result.styles ?? state.styles),
+});
+
+const withDocumentCommand = (
+    state: Pick<DesignState, 'pages' | 'currentPageId' | 'selectedIds' | 'variables' | 'styles'>,
+    result: Partial<DesignState>,
+    type: string,
+    groupId?: string,
+    metadata: StoreCommandPayload = {}
+): Partial<DesignState> => {
+    const before = captureDocumentSnapshot(state);
+    const after = buildDocumentSnapshotFromResult(state, result);
+    if (!areValuesEqual(before, after)) {
+        recordStoreCommand(type, {
+            ...metadata,
+            before,
+            after,
+        }, nextCommandGroupId(groupId || type));
+    }
+    return result;
+};
+
+const extractCommandSnapshot = (command: StoreCommand, direction: 'forward' | 'inverse'): StoreDocumentSnapshot | null => {
+    const payload = command.payload;
+    if (!isRecord(payload)) return null;
+
+    const candidate = direction === 'forward' ? payload.after : payload.before;
+    if (!isStoreDocumentSnapshot(candidate)) return null;
+    return candidate;
+};
+
+const applyForwardCommand = (command: StoreCommand): Partial<DesignState> | null => {
+    const snapshot = extractCommandSnapshot(command, 'forward');
+    if (!snapshot) return null;
+    return {
+        pages: cloneValue(snapshot.pages),
+        currentPageId: snapshot.currentPageId,
+        selectedIds: cloneValue(snapshot.selectedIds),
+        variables: cloneValue(snapshot.variables),
+        styles: cloneValue(snapshot.styles),
+    };
+};
+
+const applyInverseCommand = (command: StoreCommand): Partial<DesignState> | null => {
+    const snapshot = extractCommandSnapshot(command, 'inverse');
+    if (!snapshot) return null;
+    return {
+        pages: cloneValue(snapshot.pages),
+        currentPageId: snapshot.currentPageId,
+        selectedIds: cloneValue(snapshot.selectedIds),
+        variables: cloneValue(snapshot.variables),
+        styles: cloneValue(snapshot.styles),
+    };
 };
 
 const sanitizeCoordinate = (value: number, fallback = 0): number => {
@@ -537,127 +663,43 @@ const parseAiTweaks = (rawTweaks: unknown, selectedIds: string[]): AITweak[] => 
         .filter((tweak) => tweak.targetNodeId.length > 0 && tweak.targetProperty.length > 0);
 };
 
+const layoutReflowHelpers = {
+    getNodeById,
+    isFrameLike: (node: SceneNode | undefined): node is FrameNode => {
+        if (!node) return false;
+        return isFrameLike(node);
+    },
+    sanitizeCoordinate,
+    sanitizeSize,
+};
+
 const applyFrameSizingWithoutAutoLayout = (
     frame: FrameNode,
     children: SceneNode[],
     allNodes: SceneNode[]
 ): { frame: FrameNode; children: SceneNode[] } => {
-    const updatedFrame: FrameNode = {
-        ...frame,
-        x: sanitizeCoordinate(frame.x, 0),
-        y: sanitizeCoordinate(frame.y, 0),
-        width: sanitizeSize(frame.width, 100),
-        height: sanitizeSize(frame.height, 100),
-    };
-    const updatedChildren: SceneNode[] = children.map((child) => ({
-        ...child,
-        x: sanitizeCoordinate(child.x, 0),
-        y: sanitizeCoordinate(child.y, 0),
-        width: sanitizeSize(child.width, 1),
-        height: sanitizeSize(child.height, 1),
-    }));
-
-    const parentCandidate = getNodeById(allNodes, frame.parentId);
-    if (parentCandidate && isFrameLike(parentCandidate) && !updatedFrame.isAbsolute) {
-        const parentInnerWidth = sanitizeSize(parentCandidate.width - parentCandidate.padding.left - parentCandidate.padding.right, updatedFrame.width);
-        const parentInnerHeight = sanitizeSize(parentCandidate.height - parentCandidate.padding.top - parentCandidate.padding.bottom, updatedFrame.height);
-
-        if (updatedFrame.horizontalResizing === 'fill') {
-            updatedFrame.width = parentInnerWidth;
-            updatedFrame.x = parentCandidate.padding.left;
-        }
-        if (updatedFrame.verticalResizing === 'fill') {
-            updatedFrame.height = parentInnerHeight;
-            updatedFrame.y = parentCandidate.padding.top;
-        }
-    }
-
-    const getInnerWidth = () => sanitizeSize(updatedFrame.width - updatedFrame.padding.left - updatedFrame.padding.right, updatedFrame.width);
-    const getInnerHeight = () => sanitizeSize(updatedFrame.height - updatedFrame.padding.top - updatedFrame.padding.bottom, updatedFrame.height);
-
-    updatedChildren.forEach((child) => {
-        if (child.isAbsolute) return;
-        if (child.horizontalResizing === 'fill') {
-            child.width = getInnerWidth();
-            child.x = updatedFrame.padding.left;
-        }
-        if (child.verticalResizing === 'fill') {
-            child.height = getInnerHeight();
-            child.y = updatedFrame.padding.top;
-        }
-    });
-
-    if (updatedChildren.length > 0 && updatedFrame.horizontalResizing === 'hug') {
-        const targetMinX = updatedFrame.padding.left;
-        const minX = Math.min(...updatedChildren.map((child) => sanitizeCoordinate(child.x, 0)));
-        const shiftX = minX - targetMinX;
-
-        if (Number.isFinite(shiftX) && Math.abs(shiftX) > 0.001) {
-            updatedFrame.x = sanitizeCoordinate(updatedFrame.x + shiftX, updatedFrame.x);
-            updatedChildren.forEach((child) => {
-                child.x = sanitizeCoordinate(child.x - shiftX, child.x);
-            });
-        }
-
-        const maxX = Math.max(targetMinX, ...updatedChildren.map((child) => sanitizeCoordinate(child.x, 0) + sanitizeSize(child.width, 1)));
-        updatedFrame.width = sanitizeSize(maxX + updatedFrame.padding.right, updatedFrame.width);
-    }
-
-    if (updatedChildren.length > 0 && updatedFrame.verticalResizing === 'hug') {
-        const targetMinY = updatedFrame.padding.top;
-        const minY = Math.min(...updatedChildren.map((child) => sanitizeCoordinate(child.y, 0)));
-        const shiftY = minY - targetMinY;
-
-        if (Number.isFinite(shiftY) && Math.abs(shiftY) > 0.001) {
-            updatedFrame.y = sanitizeCoordinate(updatedFrame.y + shiftY, updatedFrame.y);
-            updatedChildren.forEach((child) => {
-                child.y = sanitizeCoordinate(child.y - shiftY, child.y);
-            });
-        }
-
-        const maxY = Math.max(targetMinY, ...updatedChildren.map((child) => sanitizeCoordinate(child.y, 0) + sanitizeSize(child.height, 1)));
-        updatedFrame.height = sanitizeSize(maxY + updatedFrame.padding.bottom, updatedFrame.height);
-    }
-
-    return {
-        frame: updatedFrame,
-        children: updatedChildren,
-    };
+    return applyFrameSizingWithoutAutoLayoutEngine(frame, children, allNodes, layoutReflowHelpers);
 };
 
 const reflowFrameBranch = (nodes: SceneNode[], frameId: string): SceneNode[] => {
-    const frame = getNodeById(nodes, frameId);
-    if (!frame || !isFrameLike(frame)) return nodes;
-
-    const children = nodes.filter((node) => node.parentId === frameId);
-    const { frame: updatedFrame, children: updatedChildren } = frame.layoutMode !== 'none'
-        ? calculateLayout(frame, children)
-        : applyFrameSizingWithoutAutoLayout(frame, children, nodes);
-
-    const updatedChildrenMap = new Map(updatedChildren.map((child) => [child.id, child]));
-    const nextNodes = nodes.map((node) => {
-        if (node.id === updatedFrame.id) return updatedFrame;
-        return updatedChildrenMap.get(node.id) || node;
+    return reflowFrameBranchEngine(nodes, frameId, layoutReflowHelpers, {
+        calculateLayout,
+        applyFrameSizingWithoutAutoLayout,
     });
-
-    return updatedFrame.parentId ? reflowFrameBranch(nextNodes, updatedFrame.parentId) : nextNodes;
 };
 
 const reflowNodeBranch = (nodes: SceneNode[], targetId: string): SceneNode[] => {
-    const node = getNodeById(nodes, targetId);
-    if (!node) return nodes;
-
-    const frameId = isFrameLike(node) ? node.id : node.parentId;
-    if (!frameId) return nodes;
-
-    return reflowFrameBranch(nodes, frameId);
+    return reflowNodeBranchEngine(nodes, targetId, layoutReflowHelpers, {
+        calculateLayout,
+        applyFrameSizingWithoutAutoLayout,
+    });
 };
 
 const reflowNodeBranches = (nodes: SceneNode[], targetIds: Array<string | undefined>): SceneNode[] => {
-    return Array.from(new Set(targetIds.filter((id): id is string => Boolean(id)))).reduce(
-        (currentNodes, targetId) => reflowNodeBranch(currentNodes, targetId),
-        nodes
-    );
+    return reflowNodeBranchesEngine(nodes, targetIds, layoutReflowHelpers, {
+        calculateLayout,
+        applyFrameSizingWithoutAutoLayout,
+    });
 };
 
 interface DesignStore extends DesignState {
@@ -699,7 +741,9 @@ interface DesignStore extends DesignState {
   addVariable: (variable: Omit<Variable, 'id'>) => void;
   addStyle: (style: Omit<Style, 'id'>) => void;
     mutateVariable: (id: string, newValue: unknown) => void;
-  // History
+    // Command-driven undo/redo
+    canUndo: () => boolean;
+    canRedo: () => boolean;
   undo: () => void;
   redo: () => void;
     pushHistory: (source?: string) => void;
@@ -716,8 +760,6 @@ export const useStore = create<DesignStore>((set, get) => ({
   hoveredId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
   tool: 'select',
-  history: [[{ id: initialPageId, name: 'Page 1', nodes: [] }]],
-  historyIndex: 0,
   mode: 'design',
   showRulers: false,
   aiHistory: [],
@@ -736,11 +778,21 @@ export const useStore = create<DesignStore>((set, get) => ({
   removeGuide: (id) => set(s => ({ guides: s.guides.filter(g => g.id !== id) })),
   setSnapLines: (snapLines) => set({ snapLines }),
   
-  setViewport: (viewport) => set((state) => ({ 
-    viewport: { ...state.viewport, ...viewport } 
-  })),
+    setViewport: (viewport) => {
+        set((state) => ({ 
+            viewport: { ...state.viewport, ...viewport } 
+        }));
+    },
 
-  setSelectedIds: (selectedIds) => set({ selectedIds }),
+    setSelectedIds: (selectedIds) => {
+        set((state) => withDocumentCommand(
+            state,
+            { selectedIds },
+            'selection.set',
+            'selection',
+            { ids: [...selectedIds] }
+        ));
+    },
 
   sendAIChat: async (message: string) => {
     const { aiHistory, pages, currentPageId, selectedIds } = get();
@@ -841,14 +893,19 @@ export const useStore = create<DesignStore>((set, get) => ({
             return p;
         });
 
-        return { 
+        const result = {
             pages,
             selectedIds: newNodes.filter(n => !n.parentId).map(n => n.id),
             aiHistory: [...state.aiHistory, { role: 'assistant' as const, content: aiText }],
-            aiTweaks: tweaks
+            aiTweaks: tweaks,
+        };
+
+        return {
+            ...withDocumentCommand(state, result, 'ai.generateUI', 'ai'),
+            aiHistory: result.aiHistory,
+            aiTweaks: result.aiTweaks,
         };
     });
-    get().pushHistory();
   },
 
   generateUIFromPrompt: async (prompt: string) => {
@@ -857,19 +914,43 @@ export const useStore = create<DesignStore>((set, get) => ({
 
   addPage: (name) => set((state) => {
       const newPage = { id: uuidv4(), name, nodes: [] };
-      return { 
-          pages: [...state.pages, newPage],
-          currentPageId: newPage.id
-      };
+      return withDocumentCommand(
+          state,
+          {
+              pages: [...state.pages, newPage],
+              currentPageId: newPage.id,
+          },
+          'page.add',
+          'pages',
+          { id: newPage.id, name }
+      );
   }),
 
-  setPages: (pages) => set({ pages }),
+  setPages: (pages) => set((state) => withDocumentCommand(
+      state,
+      { pages },
+      'page.setAll',
+      'pages',
+      { count: pages.length }
+  )),
 
-  updatePage: (id, updates) => set((state) => ({
-      pages: state.pages.map(p => p.id === id ? { ...p, ...updates } : p)
-  })),
+  updatePage: (id, updates) => set((state) => withDocumentCommand(
+      state,
+      {
+          pages: state.pages.map(p => p.id === id ? { ...p, ...updates } : p),
+      },
+      'page.update',
+      'pages',
+      { id, keys: Object.keys(updates || {}) }
+  )),
 
-  setPage: (id) => set({ currentPageId: id, selectedIds: [] }),
+  setPage: (id) => set((state) => withDocumentCommand(
+      state,
+      { currentPageId: id, selectedIds: [] },
+      'page.setCurrent',
+      'pages',
+      { id }
+  )),
 
   addNode: (node) => set((state) => {
     const currentPage = state.pages.find(p => p.id === state.currentPageId);
@@ -893,7 +974,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         newNodes = reflowNodeBranch(newNodes, nodeToInsert.id);
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-        return { pages, selectedIds: [nodeToInsert.id] };
+        return withDocumentCommand(
+            state,
+            { pages, selectedIds: [nodeToInsert.id] },
+            'node.add',
+            'nodes',
+            { id: nodeToInsert.id, type: nodeToInsert.type, parentId: nodeToInsert.parentId || null }
+        );
   }),
 
   updateNode: (id, updates) => set((state) => {
@@ -992,7 +1079,13 @@ export const useStore = create<DesignStore>((set, get) => ({
     newNodes = reflowNodeBranch(newNodes, id);
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-    return { pages };
+    return withDocumentCommand(
+        state,
+        { pages },
+        'node.update',
+        'nodes',
+        { id, keys: Object.keys(updates || {}) }
+    );
   }),
 
   groupSelected: () => set((state) => {
@@ -1044,11 +1137,17 @@ export const useStore = create<DesignStore>((set, get) => ({
 
         const newNodes = [...groupedNodes, groupNode];
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-    
-    return {
-        pages,
-                selectedIds: [groupNode.id]
-    };
+
+    return withDocumentCommand(
+        state,
+        {
+            pages,
+            selectedIds: [groupNode.id],
+        },
+        'node.groupSelected',
+        'nodes',
+        { groupId: groupNode.id, nodeCount: topLevelIds.length }
+    );
   }),
 
     createComponentFromSelection: () => set((state) => {
@@ -1095,7 +1194,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         const pages = state.pages.map((page) =>
             page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
         );
-        return { pages, selectedIds: [componentNode.id] };
+        return withDocumentCommand(
+            state,
+            { pages, selectedIds: [componentNode.id] },
+            'component.createFromSelection',
+            'nodes',
+            { componentId: componentNode.id, nodeCount: topLevelIds.length }
+        );
     }),
 
     createInstanceFromComponent: (componentId) => set((state) => {
@@ -1121,7 +1226,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         const pages = state.pages.map((page) =>
             page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
         );
-        return { pages, selectedIds: [result.rootInstanceId] };
+        return withDocumentCommand(
+            state,
+            { pages, selectedIds: [result.rootInstanceId] },
+            'component.createInstance',
+            'nodes',
+            { componentId: sourceComponent.id, instanceId: result.rootInstanceId }
+        );
     }),
 
     createVariantFromComponent: (componentId) => set((state) => {
@@ -1193,7 +1304,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         const pages = state.pages.map((page) =>
             page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
         );
-        return { pages, selectedIds: [newRootId] };
+        return withDocumentCommand(
+            state,
+            { pages, selectedIds: [newRootId] },
+            'component.createVariant',
+            'nodes',
+            { sourceComponentId: sourceComponent.id, variantId: newRootId }
+        );
     }),
 
     switchInstanceVariant: (instanceId, variantComponentId) => set((state) => {
@@ -1230,7 +1347,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         const pages = state.pages.map((page) =>
             page.id === state.currentPageId ? { ...page, nodes: nextNodes } : page
         );
-        return { pages, selectedIds: [instanceNode.id] };
+        return withDocumentCommand(
+            state,
+            { pages, selectedIds: [instanceNode.id] },
+            'instance.switchVariant',
+            'nodes',
+            { instanceId, variantComponentId }
+        );
     }),
 
     frameSelected: () => set((state) => {
@@ -1300,10 +1423,16 @@ export const useStore = create<DesignStore>((set, get) => ({
             page.id === state.currentPageId ? { ...page, nodes: [...reframedNodes, frameNode] } : page
         );
 
-        return {
-            pages,
-            selectedIds: [frameNode.id],
-        };
+        return withDocumentCommand(
+            state,
+            {
+                pages,
+                selectedIds: [frameNode.id],
+            },
+            'node.frameSelected',
+            'nodes',
+            { frameId: frameNode.id, nodeCount: topLevelIds.length }
+        );
     }),
 
     copySelected: () => set((state) => {
@@ -1402,10 +1531,16 @@ export const useStore = create<DesignStore>((set, get) => ({
             page.id === state.currentPageId ? { ...page, nodes: [...page.nodes, ...movedNodes] } : page
         );
 
-        return {
-            pages,
-            selectedIds: toUniqueIds(newRootIds),
-        };
+        return withDocumentCommand(
+            state,
+            {
+                pages,
+                selectedIds: toUniqueIds(newRootIds),
+            },
+            'node.paste',
+            'nodes',
+            { nodeCount: movedNodes.length }
+        );
     }),
 
     canPaste: () => clipboardSnapshot !== null,
@@ -1420,7 +1555,13 @@ export const useStore = create<DesignStore>((set, get) => ({
       newNodes.splice(index, 0, node);
       
       const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-      return { pages };
+      return withDocumentCommand(
+          state,
+          { pages },
+          'node.reorder',
+          'nodes',
+          { id, index }
+      );
   }),
 
   moveNodeHierarchy: (dragId, targetId, position: 'before' | 'after' | 'inside') => set((state) => {
@@ -1514,37 +1655,34 @@ export const useStore = create<DesignStore>((set, get) => ({
       newNodes = reflowNodeBranches(newNodes, [oldParentId, newParentId]);
 
       const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-      return { pages };
+      return withDocumentCommand(
+          state,
+          { pages },
+          'node.moveHierarchy',
+          'nodes',
+          { dragId, targetId, position }
+      );
   }),
 
-  addVariable: (v) => set(s => ({ variables: [...s.variables, { ...v, id: uuidv4() }] })),
-  addStyle: (st) => set(s => ({ styles: [...s.styles, { ...st, id: uuidv4() }] })),
-
-    pushHistory: (source = 'manual') => set((state) => {
-        const timestamp = Date.now();
-        const snapshot = deepClone(state.pages);
-        const nextHistory = state.history.slice(0, state.historyIndex + 1);
-        const shouldMerge = Boolean(
-            source !== 'manual' &&
-            lastHistoryCommit &&
-            lastHistoryCommit.source === source &&
-            timestamp - lastHistoryCommit.timestamp <= HISTORY_MERGE_WINDOW_MS &&
-            nextHistory.length > 0
-        );
-
-        if (shouldMerge) {
-            nextHistory[nextHistory.length - 1] = snapshot;
-        } else {
-            nextHistory.push(snapshot);
-            if (nextHistory.length > HISTORY_LIMIT) nextHistory.shift();
-        }
-
-        lastHistoryCommit = { source, timestamp };
-
-        return {
-            history: nextHistory,
-            historyIndex: nextHistory.length - 1
-        };
+  addVariable: (v) => set((state) => {
+      const variable = { ...v, id: uuidv4() };
+      return withDocumentCommand(
+          state,
+          { variables: [...state.variables, variable] },
+          'variable.add',
+          'variables',
+          { id: variable.id, name: variable.name }
+      );
+  }),
+  addStyle: (st) => set((state) => {
+      const style = { ...st, id: uuidv4() };
+      return withDocumentCommand(
+          state,
+          { styles: [...state.styles, style] },
+          'style.add',
+          'styles',
+          { id: style.id, name: style.name }
+      );
   }),
 
   deleteNodes: (ids) => set((state) => {
@@ -1554,7 +1692,13 @@ export const useStore = create<DesignStore>((set, get) => ({
         }
         return p;
     });
-    return { pages, selectedIds: [] };
+    return withDocumentCommand(
+        state,
+        { pages, selectedIds: [] },
+        'node.delete',
+        'nodes',
+        { ids: [...ids] }
+    );
   }),
 
   // Multi-Edit Logic
@@ -1638,36 +1782,68 @@ export const useStore = create<DesignStore>((set, get) => ({
     }
 
     const pages = state.pages.map(p => p.id === state.currentPageId ? { ...p, nodes: newNodes } : p);
-    return { pages };
+        return withDocumentCommand(
+                state,
+                { pages },
+                'node.alignSelected',
+                'nodes',
+                { alignment, count: state.selectedIds.length }
+        );
   }),
 
   // Prototyping Mutation
     mutateVariable: (id: string, newValue: unknown) => set((state) => {
       const variables = state.variables.map(v => v.id === id ? { ...v, value: newValue } : v);
-      return { variables };
+            return withDocumentCommand(
+                    state,
+                    { variables },
+                    'variable.mutate',
+                    'variables',
+                    { id }
+            );
   }),
 
+    canUndo: () => storeCommandBus.canUndo(),
+    canRedo: () => storeCommandBus.canRedo(),
+
   undo: () => set((state) => {
-    if (state.historyIndex > 0) {
-      const newIndex = state.historyIndex - 1;
-            resetHistoryCommit();
-      return {
-        pages: state.history[newIndex],
-        historyIndex: newIndex
-      };
-    }
-    return state;
+        const group = storeCommandBus.undo();
+        if (!group) return state;
+
+        let patch: Partial<DesignState> | null = null;
+        [...group.commandIds].reverse().forEach((commandId) => {
+            const command = storeCommandIndex.get(commandId);
+            if (!command) return;
+            const nextPatch = applyInverseCommand(command);
+            if (!nextPatch) return;
+            patch = {
+                ...(patch || {}),
+                ...nextPatch,
+            };
+        });
+
+        return patch || state;
   }),
 
   redo: () => set((state) => {
-    if (state.historyIndex < state.history.length - 1) {
-      const newIndex = state.historyIndex + 1;
-            resetHistoryCommit();
-      return {
-        pages: state.history[newIndex],
-        historyIndex: newIndex
-      };
-    }
-    return state;
+        const group = storeCommandBus.redo();
+        if (!group) return state;
+
+        let patch: Partial<DesignState> | null = null;
+        group.commandIds.forEach((commandId) => {
+            const command = storeCommandIndex.get(commandId);
+            if (!command) return;
+            const nextPatch = applyForwardCommand(command);
+            if (!nextPatch) return;
+            patch = {
+                ...(patch || {}),
+                ...nextPatch,
+            };
+        });
+
+        return patch || state;
   }),
+
+    // Backward-compatible no-op while callers finish migrating off explicit history pushes.
+    pushHistory: () => {},
 }));

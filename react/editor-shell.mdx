@@ -13,9 +13,24 @@ The `nova-design-engine/react` subpath exposes the packaged editor UI plus lower
 import { NovaEditorShell } from 'nova-design-engine/react';
 
 export default function App() {
-  return <NovaEditorShell showChat />;
+  return (
+    <NovaEditorShell
+      showChat
+      canvasRendererBackend="react-konva"
+      spatialRuntimeMode="worker"
+      enableSpatialRuntime
+    />
+  );
 }
 ```
+
+## Runtime Backend Controls
+
+Use these props when you need to tune runtime behavior:
+
+- `canvasRendererBackend`: `react-konva` | `pixi-webgl` | `canvaskit` | `webgpu`
+- `spatialRuntimeMode`: `main-thread` | `worker`
+- `enableSpatialRuntime`: `boolean`
 
 ## Composition API
 

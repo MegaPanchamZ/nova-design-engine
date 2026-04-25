@@ -19,8 +19,6 @@ const resetStore = () => {
     pages: [{ id: TEST_PAGE_ID, name: 'Page 1', nodes: [] }],
     currentPageId: TEST_PAGE_ID,
     selectedIds: [],
-    history: [[{ id: TEST_PAGE_ID, name: 'Page 1', nodes: [] }]],
-    historyIndex: 0,
   });
 };
 

@@ -1,5 +1,6 @@
-import { SceneNode, FrameNode, TextNode } from '../types';
-import { measureText } from './measureText';
+import { FrameNode, SceneNode, TextNode } from '../../types';
+import { measureText } from '../../lib/measureText';
+import { parseGridDimension, parseGridTracks, resolveTrackSizes } from './grid';
 
 type Axis = 'horizontal' | 'vertical';
 
@@ -39,10 +40,6 @@ const setAxisSize = (node: SceneNode, axis: Axis, value: number) => {
   else node.height = normalized;
 };
 
-const getAxisPosition = (node: SceneNode, axis: Axis): number => {
-  return axis === 'horizontal' ? node.x : node.y;
-};
-
 const setAxisPosition = (node: SceneNode, axis: Axis, value: number) => {
   if (axis === 'horizontal') node.x = value;
   else node.y = value;
@@ -67,68 +64,6 @@ const measureTextNode = (node: SceneNode, maxWidth?: number) => {
   const metrics = measureText(text.text, text.fontSize, text.fontFamily, maxWidth, text.lineHeight);
   if (node.horizontalResizing === 'hug') node.width = clampToNodeLimits(node, 'horizontal', metrics.width);
   if (node.verticalResizing === 'hug') node.height = clampToNodeLimits(node, 'vertical', metrics.height);
-};
-
-const parseGridDimension = (value: number | string | undefined, fallback: number): number => {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value);
-  if (typeof value === 'string') {
-    const parsed = parseInt(value, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-    const tokens = value.split(/\s+/).filter(Boolean);
-    if (tokens.length > 0) return tokens.length;
-  }
-  return fallback;
-};
-
-const parseGridTracks = (value: number | string | undefined, fallbackCount: number): string[] => {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return Array.from({ length: Math.floor(value) }, () => '1fr');
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return Array.from({ length: fallbackCount }, () => '1fr');
-    const parsed = parseInt(trimmed, 10);
-    if (Number.isFinite(parsed) && parsed > 0 && String(parsed) === trimmed) {
-      return Array.from({ length: parsed }, () => '1fr');
-    }
-    const tokens = trimmed.split(/\s+/).filter(Boolean);
-    if (tokens.length > 0) return tokens;
-  }
-  return Array.from({ length: fallbackCount }, () => '1fr');
-};
-
-const resolveTrackSizes = (tokens: string[], available: number): number[] => {
-  const parsed = tokens.map((token) => {
-    const normalized = token.toLowerCase();
-    if (normalized.endsWith('fr')) {
-      const weight = Number.parseFloat(normalized.slice(0, -2));
-      return { kind: 'fr' as const, value: Number.isFinite(weight) && weight > 0 ? weight : 1 };
-    }
-    if (normalized.endsWith('%')) {
-      const percent = Number.parseFloat(normalized.slice(0, -1));
-      if (Number.isFinite(percent) && percent > 0) {
-        return { kind: 'px' as const, value: (available * percent) / 100 };
-      }
-    }
-    if (normalized === 'auto') {
-      return { kind: 'fr' as const, value: 1 };
-    }
-    const numeric = Number.parseFloat(normalized);
-    if (Number.isFinite(numeric) && numeric > 0) {
-      return { kind: 'px' as const, value: numeric };
-    }
-    return { kind: 'fr' as const, value: 1 };
-  });
-
-  const fixed = parsed.reduce((sum, track) => (track.kind === 'px' ? sum + track.value : sum), 0);
-  const frTotal = parsed.reduce((sum, track) => (track.kind === 'fr' ? sum + track.value : sum), 0);
-  const remaining = Math.max(0, available - fixed);
-
-  return parsed.map((track) => {
-    if (track.kind === 'px') return track.value;
-    if (frTotal <= 0) return 0;
-    return (remaining * track.value) / frTotal;
-  });
 };
 
 const packFlexLines = (
@@ -211,7 +146,11 @@ const applyLegacyFillInLine = (
   targetMainSize: number,
   mainGap: number
 ) => {
-  const fillNodes = line.nodes.filter((node) => getResizingMode(node, mainAxis) === 'fill' && getGrowFactor(node, mainAxis) === 1 && (node.layoutGrow || 0) === 0);
+  const fillNodes = line.nodes.filter((node) =>
+    getResizingMode(node, mainAxis) === 'fill' &&
+    getGrowFactor(node, mainAxis) === 1 &&
+    (node.layoutGrow || 0) === 0
+  );
   if (fillNodes.length === 0) return;
 
   const fixedMain = line.nodes

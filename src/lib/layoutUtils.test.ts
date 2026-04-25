@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { calculateLayout } from './layoutUtils';
+import { calculateLayout } from '../engine/layout';
 import { createDefaultNode, FrameNode, SceneNode } from '../types';
 
 describe('calculateLayout', () => {

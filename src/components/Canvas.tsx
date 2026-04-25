@@ -4,7 +4,6 @@ import useImage from 'use-image';
 import { useStore } from '../store';
 import { createDefaultNode, Effect, FrameNode, ImageNode, Interaction, Paint, PathNode, SceneNode, TextNode, ToolType } from '../types';
 import Konva from 'konva';
-import { measureText } from '../lib/measureText';
 import { getSuperellipsePath } from '../lib/geometry';
 import {
   buildPathDataFromPenPoints,
@@ -31,9 +30,12 @@ import {
   findSmallestContainingNodeId,
   snapNodeToSpatial,
 } from '../lib/spatialRuntime';
+import { SpatialWorkerRuntime } from '../lib/spatialWorkerRuntime';
 import { createRendererAdapter } from '../engine/render/renderer';
 import { buildVisibleTiles } from '../engine/render/tiling';
 import type { RenderBackendKind } from '../engine/render/types';
+import { createRichTextDocument, toPlainText } from '../engine/text/richText';
+import { computeTextLayout } from '../engine/text/textLayout';
 import { FigmaRulers } from './Rulers';
 
 type PenPoint = { x: number; y: number; cp1?: { x: number; y: number }; cp2?: { x: number; y: number } };
@@ -190,9 +192,14 @@ const KonvaImage = ({ node, konvaProps, selectionProps, hoverProps }: KonvaImage
 export interface CanvasProps {
   rendererBackend?: RenderBackendKind;
   enableSpatialRuntime?: boolean;
+  spatialRuntimeMode?: 'main-thread' | 'worker';
 }
 
-export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime = true }: CanvasProps) => {
+export const Canvas = ({
+  rendererBackend = 'react-konva',
+  enableSpatialRuntime = true,
+  spatialRuntimeMode = 'main-thread',
+}: CanvasProps) => {
   const { 
     pages, currentPageId, selectedIds, viewport, tool, setTool, setViewport, 
     addNode, updateNode, setSelectedIds, pushHistory, mode, hoveredId, guides: persistentGuides, snapLines, setSnapLines,
@@ -209,6 +216,8 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
   const containerRef = useRef<HTMLDivElement>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
   const rendererAdapterRef = useRef<ReturnType<typeof createRendererAdapter> | null>(null);
+  const spatialWorkerRuntimeRef = useRef<SpatialWorkerRuntime | null>(null);
+  const prototypeHitRequestRef = useRef(0);
   const directSelectCycleRef = useRef<DirectSelectCycleState | null>(null);
   const viewportAnimationRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState(() => ({
@@ -238,6 +247,9 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
   const [selectedPathAnchors, setSelectedPathAnchors] = useState<PathAnchorSelection[]>([]);
   const [autoLayoutDropPreview, setAutoLayoutDropPreview] = useState<AutoLayoutDropPreview | null>(null);
   const [prototypeConnectionDraft, setPrototypeConnectionDraft] = useState<PrototypeConnectionDraft | null>(null);
+
+  const resolvedSpatialRuntimeMode = enableSpatialRuntime ? spatialRuntimeMode : 'main-thread';
+  const useWorkerSpatialRuntime = enableSpatialRuntime && resolvedSpatialRuntimeMode === 'worker';
 
   // Redlines
   const [altHeld, setAltHeld] = useState(false);
@@ -291,6 +303,34 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
       nodeIds: nodes.map((node) => node.id),
     });
   }, [dimensions.height, dimensions.width, nodes, viewport.x, viewport.y, viewport.zoom]);
+
+  useEffect(() => {
+    if (!useWorkerSpatialRuntime) {
+      spatialWorkerRuntimeRef.current?.dispose();
+      spatialWorkerRuntimeRef.current = null;
+      return;
+    }
+
+    const runtime = new SpatialWorkerRuntime();
+    spatialWorkerRuntimeRef.current = runtime;
+
+    void runtime.initialize().then((ready) => {
+      if (!ready) return;
+      runtime.load(spatialRuntime.bounds);
+    });
+
+    return () => {
+      runtime.dispose();
+      if (spatialWorkerRuntimeRef.current === runtime) {
+        spatialWorkerRuntimeRef.current = null;
+      }
+    };
+  }, [spatialRuntime.bounds, useWorkerSpatialRuntime]);
+
+  useEffect(() => {
+    if (!useWorkerSpatialRuntime) return;
+    spatialWorkerRuntimeRef.current?.load(spatialRuntime.bounds);
+  }, [spatialRuntime.bounds, useWorkerSpatialRuntime]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -855,6 +895,40 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
     );
   };
 
+  const findPrototypeTargetAtPointWorker = async (point: { x: number; y: number }, excludeId?: string): Promise<string | undefined> => {
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) return findPrototypeTargetAtPoint(point, excludeId);
+
+    const hits = await runtime.hitTest(point);
+    const filtered = hits
+      .filter((entry) => entry.id !== excludeId)
+      .filter((entry) => {
+        const node = nodesById.get(entry.id);
+        return !!node && isPrototypeTargetNode(node);
+      })
+      .sort((left, right) => {
+        const leftArea = Math.max(0, left.maxX - left.minX) * Math.max(0, left.maxY - left.minY);
+        const rightArea = Math.max(0, right.maxX - right.minX) * Math.max(0, right.maxY - right.minY);
+        return leftArea - rightArea;
+      });
+
+    return filtered[0]?.id;
+  };
+
+  const findBoundsIdsInRectWorker = async (rect: { x: number; y: number; width: number; height: number }): Promise<string[]> => {
+    const runtime = spatialWorkerRuntimeRef.current;
+    if (!runtime || !runtime.isReady()) return findBoundsIdsInRect(spatialRuntime, rect);
+
+    const hits = await runtime.search({
+      minX: rect.x,
+      minY: rect.y,
+      maxX: rect.x + rect.width,
+      maxY: rect.y + rect.height,
+    });
+
+    return hits.map((entry) => entry.id);
+  };
+
   const evaluateInteractionCondition = (condition: Interaction['condition']) => {
     if (!condition) return true;
 
@@ -1013,7 +1087,10 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
 
     // Stop editing if clicking elsewhere
     if (editingId) {
-      updateNode(editingId, { text: editingText });
+      const target = nodes.find((entry): entry is TextNode => entry.id === editingId && entry.type === 'text');
+      if (target) {
+        updateNode(editingId, buildTextEditPatch(target, editingText));
+      }
       pushHistory();
       setEditingId(null);
     }
@@ -1102,11 +1179,34 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
 
     if (prototypeConnectionDraft) {
       const pointer = getPointerPosition();
-      setPrototypeConnectionDraft({
-        sourceId: prototypeConnectionDraft.sourceId,
-        pointer,
-        targetId: findPrototypeTargetAtPoint(pointer, prototypeConnectionDraft.sourceId) || null,
-      });
+      if (useWorkerSpatialRuntime) {
+        const sourceId = prototypeConnectionDraft.sourceId;
+        const requestId = ++prototypeHitRequestRef.current;
+        setPrototypeConnectionDraft((current) => {
+          if (!current || current.sourceId !== sourceId) return current;
+          return {
+            ...current,
+            pointer,
+          };
+        });
+
+        void findPrototypeTargetAtPointWorker(pointer, sourceId).then((targetId) => {
+          if (requestId !== prototypeHitRequestRef.current) return;
+          setPrototypeConnectionDraft((current) => {
+            if (!current || current.sourceId !== sourceId) return current;
+            return {
+              ...current,
+              targetId: targetId || null,
+            };
+          });
+        });
+      } else {
+        setPrototypeConnectionDraft({
+          sourceId: prototypeConnectionDraft.sourceId,
+          pointer,
+          targetId: findPrototypeTargetAtPoint(pointer, prototypeConnectionDraft.sourceId) || null,
+        });
+      }
       return;
     }
 
@@ -1319,6 +1419,15 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
         }
       }
 
+      if (useWorkerSpatialRuntime) {
+        setSelectionRect(null);
+        void findBoundsIdsInRectWorker(box).then((hits) => {
+          setSelectedIds(hits);
+          clearPathAnchorSelection();
+        });
+        return;
+      }
+
       const hits = enableSpatialRuntime
         ? findBoundsIdsInRect(spatialRuntime, box)
         : nodes.filter(node => {
@@ -1412,10 +1521,36 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
     }
   };
 
+  const buildTextEditPatch = (node: TextNode, value: string): Partial<TextNode> => {
+    const richText = createRichTextDocument(value);
+    const maxWidth = (node.horizontalResizing === 'fixed' || node.horizontalResizing === 'fill')
+      ? Math.max(1, node.width)
+      : Math.max(160, node.width || 160);
+    const lineHeightPx = node.lineHeight || node.fontSize * 1.2;
+
+    const layout = computeTextLayout(richText, {
+      maxWidth,
+      fontSize: node.fontSize,
+      lineHeight: lineHeightPx,
+      fontFamily: node.fontFamily,
+    });
+
+    const nextHeight = (node.verticalResizing === 'hug' || node.verticalResizing === 'fill')
+      ? Math.max(node.fontSize, layout.height)
+      : node.height;
+
+    return {
+      text: value,
+      richText,
+      textLayoutMetrics: layout,
+      height: nextHeight,
+    };
+  };
+
   const handleTextDblClick = (node: SceneNode) => {
     if (node.type === 'text') {
       setEditingId(node.id);
-      setEditingText(node.text);
+      setEditingText(node.richText ? toPlainText(node.richText) : node.text);
       setEditingHeight(node.height);
       setSelectedIds([]);
     }
@@ -1429,8 +1564,15 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
         const node = nodes.find(n => n.id === editingId);
         if (node && node.type === 'text') {
             const textNode = node as TextNode;
-            const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill') ? textNode.width : undefined;
-            const metrics = measureText(newText, textNode.fontSize, textNode.fontFamily, maxWidth, textNode.lineHeight);
+            const maxWidth = (textNode.horizontalResizing === 'fixed' || textNode.horizontalResizing === 'fill')
+              ? Math.max(1, textNode.width)
+              : Math.max(160, textNode.width || 160);
+            const metrics = computeTextLayout(createRichTextDocument(newText), {
+              maxWidth,
+              fontSize: textNode.fontSize,
+              lineHeight: textNode.lineHeight || textNode.fontSize * 1.2,
+              fontFamily: textNode.fontFamily,
+            });
             setEditingHeight(metrics.height);
         }
     }
@@ -1438,7 +1580,10 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
 
   const handleTextKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
-      updateNode(editingId!, { text: editingText });
+      const target = nodes.find((entry): entry is TextNode => entry.id === editingId && entry.type === 'text');
+      if (target) {
+        updateNode(editingId!, buildTextEditPatch(target, editingText));
+      }
       pushHistory('text-edit');
       setEditingId(null);
       setEditingHeight(null);
@@ -3082,6 +3227,8 @@ export const Canvas = ({ rendererBackend = 'react-konva', enableSpatialRuntime =
       id="canvas-container"
       className="flex-1 bg-[#1A1A1A] relative overflow-hidden h-full"
       data-renderer-backend={rendererBackend}
+      data-spatial-runtime-mode={resolvedSpatialRuntimeMode}
+      data-spatial-runtime-enabled={String(enableSpatialRuntime)}
       style={{ cursor: canvasCursor }}
       onClick={() => setContextMenu(null)}
     >

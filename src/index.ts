@@ -2,7 +2,7 @@
 export * from './types';
 
 /** Auto-layout engine for frame and container reflow. */
-export { calculateLayout } from './lib/layoutUtils';
+export { calculateLayout } from './engine/layout';
 
 /** Superellipse path generator for smoothed rectangle corners. */
 export { getSuperellipsePath } from './lib/geometry';
@@ -86,7 +86,7 @@ export { TransactionalCommandBus } from './engine/state/commandBus';
 export { computeSnap } from './engine/snapping/snapEngine';
 
 /** Boolean engine wrapper with WASM adapter hooks and deterministic fallback. */
-export { DeterministicBooleanEngine, createFallbackBooleanAdapter } from './engine/geometry/booleanWasm';
+export { DeterministicBooleanEngine, createFallbackBooleanAdapter, createClipperWasmAdapter } from './engine/geometry/booleanWasm';
 
 /** Rich text model helpers and delta application utilities. */
 export { createRichTextDocument, applyDelta, toPlainText } from './engine/text/richText';

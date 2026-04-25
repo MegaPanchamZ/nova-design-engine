@@ -10,6 +10,7 @@ export interface NovaEditorShellProps extends NovaTheme {
   rightPanelWidth?: number;
   canvasRendererBackend?: RenderBackendKind;
   enableSpatialRuntime?: boolean;
+  spatialRuntimeMode?: 'main-thread' | 'worker';
 }
 
 export const NovaEditorShell = ({
@@ -19,6 +20,7 @@ export const NovaEditorShell = ({
   rightPanelWidth = 320,
   canvasRendererBackend = 'react-konva',
   enableSpatialRuntime = true,
+  spatialRuntimeMode = 'main-thread',
   mode,
   accentColor,
   panelBackgroundColor,
@@ -34,6 +36,7 @@ export const NovaEditorShell = ({
       rightPanelWidth={rightPanelWidth}
       canvasRendererBackend={canvasRendererBackend}
       enableSpatialRuntime={enableSpatialRuntime}
+      spatialRuntimeMode={spatialRuntimeMode}
       mode={mode}
       accentColor={accentColor}
       panelBackgroundColor={panelBackgroundColor}
