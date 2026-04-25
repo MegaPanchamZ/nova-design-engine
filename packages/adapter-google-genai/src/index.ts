@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import type { NovaLLMBinding, NovaLLMMessage } from '../../../src/engine/types';
+import type { NovaLLMBinding, NovaLLMMessage } from 'nova-design-engine';
 
 export interface GoogleGenAINovaAdapterOptions {
   apiKey?: string;

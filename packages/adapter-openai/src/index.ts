@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type {
   NovaLLMBinding,
   NovaLLMMessage,
-} from '../../../src/engine/types';
+} from 'nova-design-engine';
 
 export interface OpenAINovaAdapterOptions {
   apiKey?: string;
