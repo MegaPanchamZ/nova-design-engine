@@ -54,6 +54,12 @@ interface CanvasHealthSnapshot {
   }>;
 }
 
+interface CanvasPixelSnapshot {
+  nonTransparent: number;
+  width: number;
+  height: number;
+}
+
 declare global {
   interface Window {
     __novaBench?: {
@@ -129,6 +135,31 @@ const readCanvasHealth = async (page: Page): Promise<CanvasHealthSnapshot> => {
         clientWidth: canvas.clientWidth,
         clientHeight: canvas.clientHeight,
       })),
+    };
+  });
+};
+
+const readCanvasPixels = async (page: Page): Promise<CanvasPixelSnapshot | null> => {
+  return page.evaluate(() => {
+    const canvas = document.querySelector('#canvas-container canvas');
+    if (!(canvas instanceof HTMLCanvasElement)) return null;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let nonTransparent = 0;
+    for (let index = 3; index < imageData.length; index += 4) {
+      if (imageData[index] > 0) {
+        nonTransparent += 1;
+        if (nonTransparent > 500) break;
+      }
+    }
+
+    return {
+      nonTransparent,
+      width: canvas.width,
+      height: canvas.height,
     };
   });
 };
@@ -218,6 +249,14 @@ test.describe('renderer consistency', () => {
       expect(sceneSnapshot.visibleNodeCount).toBe(5);
       expect(sceneSnapshot.bounds).not.toBeNull();
       expect(sceneSnapshot.nodes).toHaveLength(6);
+
+      if (backend === 'canvas') {
+        const canvasPixels = await readCanvasPixels(page);
+        expect(canvasPixels).not.toBeNull();
+        expect(canvasPixels?.width).toBeGreaterThan(0);
+        expect(canvasPixels?.height).toBeGreaterThan(0);
+        expect(canvasPixels?.nonTransparent).toBeGreaterThan(0);
+      }
 
       if (!baselineScene || !baselineCanvas) {
         baselineScene = sceneSnapshot;

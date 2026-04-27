@@ -114,6 +114,8 @@ export const Canvas = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const transformerRef = useRef<TransformerHandle | null>(null);
   const rendererAdapterRef = useRef<ReturnType<typeof createRendererAdapter> | null>(null);
+  const rendererInitializedRef = useRef(false);
+  const rendererInitializingRef = useRef(false);
   const rendererFrameInputRef = useRef<RendererFrameInput | null>(null);
   const spatialWorkerRuntimeRef = useRef<SpatialWorkerRuntime | null>(null);
   const prototypeHitRequestRef = useRef(0);
@@ -218,6 +220,8 @@ export const Canvas = ({
   useEffect(() => {
     const adapter = createRendererAdapter({ preferredBackend: rendererBackend });
     rendererAdapterRef.current = adapter;
+    rendererInitializedRef.current = false;
+    rendererInitializingRef.current = false;
 
     let cancelled = false;
     let initializeFrame: number | null = null;
@@ -234,7 +238,16 @@ export const Canvas = ({
         return;
       }
 
-      void adapter.initialize(canvas);
+      rendererInitializingRef.current = true;
+      void adapter.initialize(canvas).then(() => {
+        if (cancelled || rendererAdapterRef.current !== adapter) return;
+        rendererInitializedRef.current = true;
+        rendererInitializingRef.current = false;
+      }).catch(() => {
+        if (cancelled || rendererAdapterRef.current !== adapter) return;
+        rendererInitializedRef.current = false;
+        rendererInitializingRef.current = false;
+      });
     };
 
     tryInitialize();
@@ -246,6 +259,8 @@ export const Canvas = ({
       if (rendererAdapterRef.current === adapter) {
         rendererAdapterRef.current = null;
       }
+      rendererInitializedRef.current = false;
+      rendererInitializingRef.current = false;
     };
   }, [isPureRendererMode, rendererBackend]);
 
@@ -263,8 +278,20 @@ export const Canvas = ({
       if (!active) return;
       const adapter = rendererAdapterRef.current;
       const input = rendererFrameInputRef.current;
-      if (adapter && input) {
+      if (adapter && input && rendererInitializedRef.current) {
         void adapter.renderFrame(input);
+      } else if (adapter && input && pureCanvasRef.current && !rendererInitializingRef.current) {
+        rendererInitializingRef.current = true;
+        const canvas = pureCanvasRef.current;
+        void adapter.initialize(canvas).then(() => {
+          if (rendererAdapterRef.current !== adapter) return;
+          rendererInitializedRef.current = true;
+          rendererInitializingRef.current = false;
+        }).catch(() => {
+          if (rendererAdapterRef.current !== adapter) return;
+          rendererInitializedRef.current = false;
+          rendererInitializingRef.current = false;
+        });
       }
       rafId = requestAnimationFrame(renderLoop);
     };
@@ -2413,7 +2440,7 @@ export const Canvas = ({
 
       {contextMenu && (
         <div
-          className="fixed z-[120] w-48 rounded-xl border border-[#2A2A2A] bg-[#0B0B0B] p-1 shadow-2xl"
+          className="fixed z-120 w-48 rounded-xl border border-[#2A2A2A] bg-[#0B0B0B] p-1 shadow-2xl"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >

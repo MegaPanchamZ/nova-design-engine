@@ -78,8 +78,13 @@ const resolveNodeStrokeColor = (node: SceneNode): string | null => {
   return null;
 };
 
+const resolveNodeOpacity = (node: SceneNode): number => {
+  if (typeof node.opacity !== 'number' || Number.isNaN(node.opacity)) return 1;
+  return Math.max(0, Math.min(1, node.opacity));
+};
+
 const shouldRenderNode = (node: SceneNode): boolean => {
-  return node.visible !== false && node.opacity > 0;
+  return node.visible !== false && resolveNodeOpacity(node) > 0;
 };
 
 const drawTextNode2D = (ctx: Render2DContext, entry: NonNullable<RendererFrameInput['sceneNodes']>[number]): number => {
@@ -103,7 +108,7 @@ const drawTextNode2D = (ctx: Render2DContext, entry: NonNullable<RendererFrameIn
   ctx.beginPath();
   ctx.rect(globalX, globalY, Math.max(1, node.width), Math.max(1, node.height));
   ctx.clip();
-  ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
+  ctx.globalAlpha = resolveNodeOpacity(node);
   ctx.fillStyle = fill;
   ctx.textBaseline = 'alphabetic';
   ctx.font = `${node.fontStyle === 'italic' ? 'italic ' : ''}${fontSize}px ${node.fontFamily || 'sans-serif'}`;
@@ -153,7 +158,7 @@ const drawNode2D = (ctx: Render2DContext, entry: NonNullable<RendererFrameInput[
 
   const fill = resolveNodeFillColor(node);
   const stroke = resolveNodeStrokeColor(node);
-  ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
+  ctx.globalAlpha = resolveNodeOpacity(node);
 
   if (node.type === 'path' && node.data) {
     const path = new Path2D(node.data);
@@ -299,7 +304,7 @@ const createCanvasRenderer = (): RendererAdapter => {
   return {
     kind: 'canvas',
     async initialize(canvas) {
-      context = createOffscreenContext(canvas) || (canvas as HTMLCanvasElement).getContext?.('2d') || null;
+      context = canvas.getContext('2d') || createOffscreenContext(canvas);
     },
     async renderFrame(input) {
       return drawScene2D(context, input);
