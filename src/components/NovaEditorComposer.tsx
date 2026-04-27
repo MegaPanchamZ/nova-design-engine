@@ -88,19 +88,22 @@ export const NovaEditorComposer = ({
         display: 'grid',
         gridTemplateColumns: columns,
         height: '100vh',
+        minHeight: 0,
+        minWidth: 0,
+        overflow: 'hidden',
         width: '100%',
         ...style,
       }}
     >
-      {hasLeft ? <div style={{ borderRight: `1px solid ${borderColor || '#2A2A2A'}`, overflow: 'hidden' }}>{layersNode}</div> : null}
+      {hasLeft ? <div style={{ borderRight: `1px solid ${borderColor || '#2A2A2A'}`, overflow: 'hidden', minHeight: 0, minWidth: 0 }}>{layersNode}</div> : null}
 
-      <div style={{ position: 'relative', overflow: 'hidden' }}>
+      <div style={{ position: 'relative', overflow: 'hidden', minHeight: 0, minWidth: 0, display: 'flex' }}>
         {canvasNode}
         {toolbarNode}
       </div>
 
       {hasRight ? (
-        <div style={{ borderLeft: `1px solid ${borderColor || '#2A2A2A'}`, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ borderLeft: `1px solid ${borderColor || '#2A2A2A'}`, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
           {propertiesNode ? <div style={{ flex: '1 1 0', minHeight: 0 }}>{propertiesNode}</div> : null}
           {assistantNode ? <div style={{ flex: '1 1 0', minHeight: 0, borderTop: `1px solid ${borderColor || '#2A2A2A'}` }}>{assistantNode}</div> : null}
         </div>

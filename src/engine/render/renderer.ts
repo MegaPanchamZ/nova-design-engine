@@ -1,4 +1,6 @@
 import type { SceneNode } from '../../types';
+import { computeTextLayout } from '../text/textLayout';
+import { createRichTextDocument, toPlainText } from '../text/richText';
 import { buildMaskRuns } from './maskStack';
 import { createCanvasKitAdapter } from './canvasKitAdapter';
 import { RendererAdapter, RenderStats, RendererFrameInput, RenderBackendKind } from './types';
@@ -80,6 +82,46 @@ const shouldRenderNode = (node: SceneNode): boolean => {
   return node.visible !== false && node.opacity > 0;
 };
 
+const drawTextNode2D = (ctx: Render2DContext, entry: NonNullable<RendererFrameInput['sceneNodes']>[number]): number => {
+  const { node, globalX, globalY } = entry;
+  if (node.type !== 'text' || !shouldRenderNode(node)) return 0;
+
+  const fill = resolveNodeFillColor(node) || '#E5E7EB';
+  const fontSize = Math.max(1, node.fontSize || 14);
+  const lineHeight = Math.max(1, node.lineHeight || fontSize * 1.2);
+  const richText = node.richText || createRichTextDocument(node.text || '');
+  const text = toPlainText(richText);
+  const layout = computeTextLayout(richText, {
+    maxWidth: Math.max(1, node.width),
+    fontSize,
+    lineHeight,
+    fontFamily: node.fontFamily || 'sans-serif',
+    fontStyle: node.fontStyle === 'italic' ? 'italic' : 'normal',
+  });
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(globalX, globalY, Math.max(1, node.width), Math.max(1, node.height));
+  ctx.clip();
+  ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
+  ctx.fillStyle = fill;
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `${node.fontStyle === 'italic' ? 'italic ' : ''}${fontSize}px ${node.fontFamily || 'sans-serif'}`;
+
+  layout.lines.forEach((line) => {
+    const lineText = text.slice(line.start, line.end);
+    const alignOffset = node.align === 'center'
+      ? (node.width - line.width) / 2
+      : node.align === 'right'
+        ? node.width - line.width
+        : 0;
+    ctx.fillText(lineText, globalX + Math.max(0, alignOffset), globalY + line.baseline);
+  });
+
+  ctx.restore();
+  return Math.max(1, layout.lines.length);
+};
+
 const drawDirtyRegions2D = (ctx: Render2DContext | null, input: RendererFrameInput): RenderStats => {
   const start = performance.now();
 
@@ -106,12 +148,7 @@ const drawNode2D = (ctx: Render2DContext, entry: NonNullable<RendererFrameInput[
   if (!shouldRenderNode(node)) return 0;
 
   if (node.type === 'text') {
-    const fill = resolveNodeFillColor(node) || '#E5E7EB';
-    ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
-    ctx.fillStyle = fill;
-    ctx.font = `${Math.max(1, node.fontSize || 14)}px ${node.fontFamily || 'sans-serif'}`;
-    ctx.fillText(node.text || '', globalX, globalY + Math.max(node.fontSize || 14, 14));
-    return 1;
+    return drawTextNode2D(ctx, entry);
   }
 
   const fill = resolveNodeFillColor(node);

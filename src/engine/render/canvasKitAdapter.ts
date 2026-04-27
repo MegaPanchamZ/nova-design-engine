@@ -1,4 +1,6 @@
 import type { SceneNode } from '../../types';
+import { computeTextLayout } from '../text/textLayout';
+import { createRichTextDocument, toPlainText } from '../text/richText';
 import { buildMaskRuns } from './maskStack';
 import type { RenderBackendKind, RenderCamera, RendererAdapter, RendererFrameInput, RenderSceneNode, RenderStats } from './types';
 
@@ -10,6 +12,24 @@ const dynamicImport: DynamicImport = async <T = unknown>(moduleName: string): Pr
 };
 
 const DEFAULT_CANVASKIT_CDN = 'https://unpkg.com/canvaskit-wasm@0.39.1/bin/full';
+const CANVASKIT_LOAD_TIMEOUT_MS = 3000;
+
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+};
 
 const parseHexColor = (value: string): { r: number; g: number; b: number } | null => {
   const normalized = value.trim();
@@ -59,6 +79,28 @@ const resolveNodeStrokeColor = (node: SceneNode): string | null => {
 
 const shouldRenderNode = (node: SceneNode): boolean => {
   return node.visible !== false && node.opacity > 0;
+};
+
+const getTextLayout = (node: Extract<SceneNode, { type: 'text' }>) => {
+  const fontSize = Math.max(1, node.fontSize || 14);
+  const lineHeight = Math.max(1, node.lineHeight || fontSize * 1.2);
+  const richText = node.richText || createRichTextDocument(node.text || '');
+  const text = toPlainText(richText);
+  const layout = computeTextLayout(richText, {
+    maxWidth: Math.max(1, node.width),
+    fontSize,
+    lineHeight,
+    fontFamily: node.fontFamily || 'sans-serif',
+    fontStyle: node.fontStyle === 'italic' ? 'italic' : 'normal',
+  });
+
+  return { fontSize, richText, text, layout };
+};
+
+const getAlignedTextX = (node: Extract<SceneNode, { type: 'text' }>, lineWidth: number) => {
+  if (node.align === 'center') return Math.max(0, (node.width - lineWidth) / 2);
+  if (node.align === 'right') return Math.max(0, node.width - lineWidth);
+  return 0;
 };
 
 const toCamera = (input: RendererFrameInput): RenderCamera => {
@@ -126,17 +168,26 @@ const drawNodeWithSkia = (canvasKit: any, canvas: any, entry: RenderSceneNode): 
     const fillColorHex = resolveNodeFillColor(node) || '#E5E7EB';
     const fillColor = parseHexColor(fillColorHex);
     if (!fillColor) return 0;
+    const { fontSize, text, layout } = getTextLayout(node);
 
     const paint = new canvasKit.Paint();
     paint.setColor(canvasKit.Color4f(fillColor.r / 255, fillColor.g / 255, fillColor.b / 255, alpha));
     paint.setStyle(canvasKit.PaintStyle.Fill);
     paint.setAntiAlias(true);
 
-    const font = new canvasKit.Font(null, Math.max(1, node.fontSize || 14));
-    canvas.drawSimpleText(node.text || '', entry.globalX, entry.globalY + Math.max(node.fontSize || 14, 14), font, paint);
+    const font = new canvasKit.Font(null, fontSize);
+    canvas.save();
+    canvas.clipRect(canvasKit.XYWHRect(entry.globalX, entry.globalY, Math.max(1, node.width), Math.max(1, node.height)), canvasKit.ClipOp?.Intersect ?? 0, true);
+    layout.lines.forEach((line) => {
+      const lineText = text.slice(line.start, line.end);
+      const x = entry.globalX + getAlignedTextX(node, line.width);
+      const y = entry.globalY + line.baseline;
+      canvas.drawSimpleText(lineText, x, y, font, paint);
+    });
+    canvas.restore();
     font.delete?.();
     paint.delete?.();
-    return 1;
+    return Math.max(1, layout.lines.length);
   }
 
   const path = makeSkiaPath(canvasKit, entry);
@@ -230,10 +281,22 @@ const drawFallback2D = (ctx: CanvasRenderingContext2D | OffscreenCanvasRendering
 
       if (node.type === 'text') {
         const fill = resolveNodeFillColor(node) || '#E5E7EB';
+        const { fontSize, text, layout } = getTextLayout(node);
         ctx.fillStyle = fill;
         ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
-        ctx.font = `${Math.max(1, node.fontSize || 14)}px ${node.fontFamily || 'sans-serif'}`;
-        ctx.fillText(node.text || '', globalX, globalY + Math.max(node.fontSize || 14, 14));
+        ctx.font = `${node.fontStyle === 'italic' ? 'italic ' : ''}${fontSize}px ${node.fontFamily || 'sans-serif'}`;
+        ctx.textBaseline = 'alphabetic';
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(globalX, globalY, Math.max(1, node.width), Math.max(1, node.height));
+        ctx.clip();
+        layout.lines.forEach((line) => {
+          const lineText = text.slice(line.start, line.end);
+          const x = globalX + getAlignedTextX(node, line.width);
+          const y = globalY + line.baseline;
+          ctx.fillText(lineText, x, y);
+        });
+        ctx.restore();
         return;
       }
 
@@ -316,17 +379,33 @@ export const createCanvasKitAdapter = (options: CanvasKitAdapterOptions = {}): R
       }
 
       try {
-        const localModule = await dynamicImport<Record<string, unknown>>('canvaskit-wasm');
+        const localModule = await withTimeout(
+          dynamicImport<Record<string, unknown>>('canvaskit-wasm'),
+          CANVASKIT_LOAD_TIMEOUT_MS,
+          'CanvasKit local import'
+        );
         const init = (localModule.default || localModule.CanvasKitInit) as ((config?: { locateFile?: (file: string) => string }) => Promise<any>) | undefined;
         if (!init) throw new Error('CanvasKitInit not found');
 
-        canvasKit = await init({ locateFile: (file: string) => `${cdnBaseUrl}/${file}` });
+        canvasKit = await withTimeout(
+          init({ locateFile: (file: string) => `${cdnBaseUrl}/${file}` }),
+          CANVASKIT_LOAD_TIMEOUT_MS,
+          'CanvasKit local init'
+        );
       } catch {
         try {
-          const remoteModule = await dynamicImport<Record<string, unknown>>(`${cdnBaseUrl}/canvaskit.js`);
+          const remoteModule = await withTimeout(
+            dynamicImport<Record<string, unknown>>(`${cdnBaseUrl}/canvaskit.js`),
+            CANVASKIT_LOAD_TIMEOUT_MS,
+            'CanvasKit remote import'
+          );
           const init = (remoteModule.default || remoteModule.CanvasKitInit) as ((config?: { locateFile?: (file: string) => string }) => Promise<any>) | undefined;
           if (!init) throw new Error('CanvasKitInit remote not found');
-          canvasKit = await init({ locateFile: (file: string) => `${cdnBaseUrl}/${file}` });
+          canvasKit = await withTimeout(
+            init({ locateFile: (file: string) => `${cdnBaseUrl}/${file}` }),
+            CANVASKIT_LOAD_TIMEOUT_MS,
+            'CanvasKit remote init'
+          );
         } catch {
           canvasKit = null;
           surface = null;

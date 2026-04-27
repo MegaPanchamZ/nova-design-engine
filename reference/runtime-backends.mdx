@@ -12,9 +12,13 @@ Nova React hosts expose backend switches so you can control rendering and spatia
 Use `canvasRendererBackend` to select the render adapter:
 
 - `react-konva` (default)
+- `canvas`
 - `pixi-webgl`
+- `skia`
 - `canvaskit`
 - `webgpu` (fallback path today)
+
+`skia` and `canvaskit` both map to the CanvasKit adapter.
 
 ## Spatial Runtime
 
@@ -49,7 +53,7 @@ import { NovaEditorComposer } from 'nova-design-engine/react';
 export function ComposerSurface() {
   return (
     <NovaEditorComposer
-      canvasRendererBackend="canvaskit"
+      canvasRendererBackend="skia"
       spatialRuntimeMode="main-thread"
       showAssistant={false}
       leftPanelWidth={300}
@@ -76,6 +80,9 @@ export function PrototypeViewer() {
 
 ## Runtime Notes
 
+- `react-konva` is loaded lazily in the React canvas shell, so hosts can keep Konva as an optional peer path.
+- `canvas` uses the built-in 2D adapter and is useful as a predictable baseline backend.
+- `skia`/`canvaskit` use the same adapter and may fallback to 2D rendering if CanvasKit is unavailable.
 - Worker mode currently offloads hit-testing and rectangle selection queries.
 - Main-thread mode keeps all spatial lookups local and synchronous.
 - The container emits runtime metadata attributes for debugging:

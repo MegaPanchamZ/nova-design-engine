@@ -2264,7 +2264,7 @@ export const Canvas = ({
   return (
     <div
       id="canvas-container"
-      className="flex-1 bg-[#1A1A1A] relative overflow-hidden h-full"
+      className="bg-[#1A1A1A] relative overflow-hidden h-full min-h-0 min-w-0 w-full"
       data-renderer-backend={rendererBackend}
       data-spatial-runtime-mode={resolvedSpatialRuntimeMode}
       data-spatial-runtime-enabled={String(enableSpatialRuntime)}

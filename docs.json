@@ -30,6 +30,7 @@
           "reference/core-toolkit",
           "reference/presets",
           "reference/runtime-backends",
+          "reference/rendering-tests-and-benchmarks",
           "reference/scale-roadmap"
         ]
       }

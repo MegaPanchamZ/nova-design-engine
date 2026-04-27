@@ -9,14 +9,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "konva": "^10.2.5",
     "nova-design-engine": "file:../..",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-konva": "^19.2.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.1.5",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.1.5",
     "typescript": "~5.8.2",
     "vite": "^7.1.9"
   }

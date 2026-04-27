@@ -31,6 +31,7 @@ Editor capabilities already included in the package:
 - Effects for drop shadow, inner shadow, layer blur, and background blur.
 - Smart guides, snapping, inline text editing, and direct-select path editing.
 - Boolean path operations for union, subtract, intersect, and exclude.
+- Multi-backend rendering adapters (`react-konva`, `canvas`, `pixi-webgl`, `skia`/`canvaskit`, `webgpu` fallback).
 - Prototype interactions in `prototype` mode, on-canvas noodle authoring between frames, and a standalone `Viewer` component.
 - Undo and redo state history with lightweight batching for repeated actions.
 
@@ -194,8 +195,27 @@ Typed preset exports:
 ```bash
 npm run typecheck
 npm test
+npm run bench:render
+npm run bench:browser
 npm run build
 ```
+
+Benchmark all configured renderer backends:
+
+```bash
+npm run bench
+```
+
+The renderer benchmark compares `react-konva`, `canvas`, `pixi-webgl`, `webgpu`, `skia`, and `canvaskit` adapters in the same input scene.
+
+For real-browser runs, use Playwright-backed benchmarks:
+
+```bash
+npm run bench:browser:install
+npm run bench:browser
+```
+
+The browser benchmark drives a bounded stress scene in `examples/basic-editor` (`2,500` nodes for stable automation), performs pan/zoom interactions, and records FPS telemetry per backend. The in-app manual stress control still loads `10,000` nodes.
 
 To build the official adapters in this workspace:
 

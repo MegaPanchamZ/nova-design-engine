@@ -1,0 +1,99 @@
+---
+title: Rendering Tests And Benchmarks
+description: Validate renderer behavior across backends and benchmark them in a consistent scene.
+---
+
+# Rendering Tests And Benchmarks
+
+Nova Design Engine includes backend-level rendering tests and a benchmark harness so hosts can compare renderer behavior and throughput consistently.
+
+## Backends Covered
+
+- `react-konva`
+- `canvas`
+- `pixi-webgl`
+- `webgpu`
+- `skia`
+- `canvaskit`
+
+## Run Rendering Tests
+
+Run the full suite:
+
+```bash
+npm test
+```
+
+Run renderer-specific tests only:
+
+```bash
+npx vitest run src/engine/render/renderer.backends.test.ts
+```
+
+What these tests validate:
+
+- Adapter creation for each backend.
+- `initialize` / `renderFrame` / `dispose` lifecycle behavior.
+- Non-zero render stats for identical frame inputs.
+- Deterministic unit behavior in Node (CanvasKit adapter creation is stubbed in the unit test suite).
+
+## Run Backend Benchmarks
+
+Run all benches:
+
+```bash
+npm run bench
+```
+
+Run renderer comparison only:
+
+```bash
+npm run bench:render
+```
+
+The benchmark executes the same scene and dirty-region payload through every backend adapter and prints comparative timings.
+
+## Run Real-Browser Benchmarks (Playwright)
+
+Install the Chromium browser once:
+
+```bash
+npm run bench:browser:install
+```
+
+Run the browser benchmark suite:
+
+```bash
+npm run bench:browser
+```
+
+Run the same suite in headed mode:
+
+```bash
+npm run bench:browser:headed
+```
+
+What the Playwright benchmark does:
+
+- Boots `examples/basic-editor` in a real browser engine.
+- Loads a bounded `2,500` node stress document for stable automated runs.
+- Cycles renderer backends (`react-konva`, `canvas`, `pixi-webgl`, `skia`, `canvaskit`, `webgpu`).
+- Performs pan/zoom interactions and captures FPS telemetry from the app.
+- Attaches text and JSON summaries to Playwright test artifacts.
+
+## Manual Visual Stress Test
+
+In `examples/basic-editor`, use the benchmark panel in the top-right:
+
+- Choose a renderer backend.
+- Click `Load 10,000 Stress`.
+- Pan/zoom and watch the live FPS counter.
+
+This is useful for side-by-side experiential evaluation while the Playwright run provides reproducible metrics on a smaller bounded workload.
+
+## Benchmark Notes
+
+- The harness is deterministic and Node-friendly (no browser bootstrapping required).
+- Benchmarks run through real adapter entrypoints for each backend.
+- `skia`/`canvaskit` may automatically use 2D fallback paths if CanvasKit binaries are unavailable.
+- Use the results as relative comparisons within the same machine and run.
